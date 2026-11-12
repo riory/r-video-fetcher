@@ -1,0 +1,5 @@
+#!/bin/sh
+set -eu
+
+echo "Running unit tests before push..."
+cargo test --target-dir target/pre-push-tests --test unit

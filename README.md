@@ -50,7 +50,7 @@ Project files store the URL, detected media type, target folder, estimated/downl
 
 - Each dialog is implemented in its own file under `src/dialogs/`.
 - English and Russian UI resources are stored separately in `src/locales/`.
-- Integration tests are kept in the top-level `tests/` directory.
+- Unit tests are grouped under `tests/unit/`; integration tests are grouped under `tests/integration/`.
 
 ## Validate
 
@@ -60,8 +60,14 @@ cargo test
 cargo build
 ```
 
-The live YouTube integration tests require network access, `yt-dlp`, and `ffmpeg`; they verify metadata and output folder selection without downloading videos. Playlist inspection uses a flat listing to avoid slow per-video metadata extraction, so playlist size estimates may be unknown. Run the tests explicitly with:
+The live YouTube integration tests require network access, `yt-dlp`, and `ffmpeg`; they inspect live metadata, estimate playlist sizes, and download media. They are ignored by default. Run them explicitly with:
 
 ```powershell
-cargo test --test youtube_integration_tests -- --ignored --test-threads=1
+cargo test --target-dir target/pre-push-tests --test integration -- --ignored --test-threads=1
+```
+
+The Git pre-push hook runs only the tests under `tests/unit/`; it excludes `tests/integration/`. Enable the repository hook after cloning with:
+
+```powershell
+git config core.hooksPath .githooks
 ```
