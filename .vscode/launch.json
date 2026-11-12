@@ -1,0 +1,16 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug r-video-fetcher",
+      "type": "lldb-dap",
+      "request": "launch",
+      "debugAdapterExecutable": "${env:ProgramFiles}\\LLVM\\bin\\lldb-dap.exe",
+      "program": "${workspaceFolder}\\target\\debug\\r-video-fetcher.exe",
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "preLaunchTask": "Build r-video-fetcher",
+      "stopOnEntry": false
+    }
+  ]
+}
