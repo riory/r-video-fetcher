@@ -25,6 +25,10 @@ Download feature:
 - for each video ensure that download is complete, verify file integrity
 - download process should be interactive (progress bar for each file and overall batch) 
 - provide an Abort control for each download item; aborting one item stops its retries and does not stop the rest of the batch
+- keep the download plan, estimate, warnings, file estimates, and batch settings visible while a batch is downloading and after it completes
+- disable the Download button while the batch is downloading; re-enable it after completion
+- show an enabled Abort button while downloading; aborting the batch stops active downloads and prevents pending items from starting
+- after completion, show the Cancel button again and keep it enabled
 - show inspection status in the status bar, including playlist metadata retrieval, per-item size estimation, and disk-space checks
 - estimate playlist item sizes concurrently and report completed, active, and unavailable item counts
 
@@ -65,6 +69,7 @@ Coding guidelines:
 - keep the locale resource lookup in place for English and Russian
 - DO NOT CUT CORNERS!
     - no ad-hoc string parsing when proper object property can be used
+    - no ad-hoc unit tests in source files!!!!!
 
 UI:
 - main window
@@ -118,6 +123,9 @@ UI:
     - always show batch video resolution, audio sample rate, and audio channel settings
     - button to start download
         - on click, start download, update progress bars (current file, overall batch)      
+        - keep the plan and all fields visible while downloading and after completion
+        - disable Download during the batch, then re-enable Download and restore the enabled Cancel button when it completes
+        - show an enabled Abort button during the batch that aborts the entire batch
         - show an Abort button per item; disable it when the item is verifying or has completed, failed, or been aborted
     - should be spread out, colors should be contrasting
     - only shows current project, no history

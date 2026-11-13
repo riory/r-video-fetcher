@@ -132,6 +132,7 @@ fn download_session_tracks_inspection_progress_and_terminal_states() {
     assert_eq!(session.plan().unwrap().batch_name, plan.batch_name);
     assert_eq!(session.begin_download().unwrap().items.len(), 3);
     assert!(session.is_downloading());
+    assert_eq!(session.plan().unwrap().batch_name, plan.batch_name);
 
     session.mark_attempt_started(0, 1, 4);
     session.report_progress(0, 50.0);
@@ -147,6 +148,7 @@ fn download_session_tracks_inspection_progress_and_terminal_states() {
     assert!(session.overall_progress() > 0.0);
     session.finish_download();
     assert!(!session.is_busy());
+    assert_eq!(session.plan().unwrap().batch_name, plan.batch_name);
 }
 
 #[test]

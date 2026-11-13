@@ -12,6 +12,7 @@
   "preferences": "Preferences",
   "init": "Init",
   "target_folder": "Target folder",
+  "channel": "Channel",
   "media_type": "Type",
   "unknown_type": "Unknown",
   "single_video": "Single video",

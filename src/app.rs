@@ -39,8 +39,9 @@ pub struct VideoFetcherApp {
     download_session: DownloadSession,
     events_tx: Sender<DownloadEvent>,
     events_rx: Receiver<DownloadEvent>,
-    abort_tx: Option<Sender<usize>>,
+    abort_tx: Option<Sender<download_engine::AbortRequest>>,
     settings_dialog: SettingsDialog,
+    focus_download_button: bool,
     status: String,
     error: Option<String>,
 }
@@ -100,6 +101,7 @@ impl VideoFetcherApp {
             events_rx,
             abort_tx: None,
             settings_dialog: SettingsDialog::default(),
+            focus_download_button: false,
             status: String::new(),
             error: (!errors.is_empty()).then(|| errors.join("\n")),
         }
@@ -524,6 +526,8 @@ impl VideoFetcherApp {
                             self.status = plan_status;
                             if auto_download && project_saved {
                                 self.start_download();
+                            } else {
+                                self.focus_download_button = true;
                             }
                         }
                         Err(error) => {
@@ -771,11 +775,16 @@ impl VideoFetcherApp {
 
     fn show_plan(&mut self, ui: &mut egui::Ui) {
         let Some(plan) = self.download_session.plan() else {
+            self.focus_download_button = false;
             return;
         };
         let warning = plan.estimated_bytes > plan.free_bytes || plan.unknown_size_count > 0;
         ui.separator();
         ui.heading(format!("{}: {}", self.text(Label::Plan), plan.batch_name));
+        if let Some(item) = plan.items.first() {
+            let channel = &item.channel;
+            ui.label(format!("{}: {channel}", self.text(Label::Channel)));
+        }
         ui.label(format!(
             "{}: {}",
             self.text(Label::EstimatedSize),
@@ -814,17 +823,53 @@ impl VideoFetcherApp {
                 ui.label(format!("{} - {}", item.title, estimate));
             }
         });
+        let downloading = self.download_session.is_downloading();
         ui.horizontal(|ui| {
-            let button = if warning {
+            let download_text = if warning {
                 self.text(Label::DownloadAnyway)
             } else {
                 self.text(Label::Download)
             };
-            if ui.button(button).clicked() {
+            let download_button_response = ui.add_enabled(
+                !downloading,
+                egui::Button::new(egui::RichText::new(download_text).heading())
+                    .min_size(egui::vec2(180.0, 36.0)),
+            );
+            if std::mem::take(&mut self.focus_download_button) {
+                download_button_response.request_focus();
+            }
+            if download_button_response.clicked() {
                 self.start_download();
             }
-            if ui.button(self.text(Label::CancelPreview)).clicked() {
-                self.download_session.clear();
+            let abort_text = if downloading {
+                self.text(Label::Abort)
+            } else {
+                self.text(Label::CancelPreview)
+            };
+            if ui
+                .add(
+                    egui::Button::new(egui::RichText::new(abort_text).heading())
+                        .min_size(egui::vec2(180.0, 36.0)),
+                )
+                .clicked()
+            {
+                if downloading {
+                    match self
+                        .abort_tx
+                        .as_ref()
+                        .map(|sender| sender.send(download_engine::AbortRequest::Batch))
+                    {
+                        Some(Ok(())) => {}
+                        Some(Err(error)) => {
+                            self.error = Some(format!("Could not abort download batch: {error}"));
+                        }
+                        None => {
+                            self.error = Some("Download cancellation is unavailable.".to_owned())
+                        }
+                    }
+                } else {
+                    self.download_session.clear();
+                }
             }
         });
     }
@@ -865,7 +910,11 @@ impl VideoFetcherApp {
                 }
             });
         if let Some(index) = abort_index {
-            match self.abort_tx.as_ref().map(|sender| sender.send(index)) {
+            match self
+                .abort_tx
+                .as_ref()
+                .map(|sender| sender.send(download_engine::AbortRequest::Item(index)))
+            {
                 Some(Ok(())) => {
                     self.download_session.mark_aborting(index);
                 }
@@ -1148,8 +1197,18 @@ impl eframe::App for VideoFetcherApp {
                         None => self.text(Label::UnknownType),
                     };
                     ui.label(format!("{}: {media_type}", self.text(Label::MediaType)));
+                    ui.add_space(8.0);
                     ui.horizontal(|ui| {
-                        if ui.button(self.text(Label::Preview)).clicked() || submit {
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    egui::RichText::new(self.text(Label::Preview)).heading(),
+                                )
+                                .min_size(egui::vec2(180.0, 36.0)),
+                            )
+                            .clicked()
+                            || submit
+                        {
                             self.start_inspection(false);
                         }
                         if self.download_session.is_inspecting() {

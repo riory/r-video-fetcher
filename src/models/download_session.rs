@@ -74,7 +74,7 @@ impl DownloadSession {
     }
 
     pub fn begin_download(&mut self) -> Option<DownloadPlan> {
-        let plan = self.plan.take()?;
+        let plan = self.plan.clone()?;
         self.items = initial_progress(&plan.items);
         self.phase = DownloadPhase::Downloading;
         Some(plan)

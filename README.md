@@ -43,7 +43,7 @@ The app's **File** menu supports New/Open/Save/Settings/Exit for `.dwnl` project
 
 The main window's position and size are saved on exit and restored on startup, clamped to the current monitor.
 
-Enter an HTTP(S) video or playlist URL and press Enter or select Estimate and preview. Review the size and free-space estimate, then confirm the download. Files are organized under the configured root folder as:
+Enter an HTTP(S) video or playlist URL and press Enter or select Estimate and preview. When estimation finishes, the Download button receives focus. Review the size and free-space estimate, then start the download. The plan and its fields remain visible during and after downloading. While downloading, Download is disabled and Abort stops the batch, including pending items; per-video Abort controls remain available for individual items. After completion, Download and Cancel are enabled again. Files are organized under the configured root folder as:
 
 ```text
 <root>/<channel>/<playlist if applicable>/<title> [<id>].<extension>

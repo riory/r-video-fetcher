@@ -12,6 +12,7 @@
   "preferences": "Параметры",
   "init": "Установка",
   "target_folder": "Папка назначения",
+  "channel": "Канал",
   "media_type": "Тип",
   "unknown_type": "Неизвестно",
   "single_video": "Одно видео",

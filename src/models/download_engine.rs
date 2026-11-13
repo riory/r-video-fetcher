@@ -68,6 +68,12 @@ pub enum DownloadEvent {
     Finished(Result<Project, String>),
 }
 
+#[derive(Clone, Copy, Debug)]
+pub enum AbortRequest {
+    Item(usize),
+    Batch,
+}
+
 pub fn inspect_batch(source_url: &str, settings: &Settings) -> Result<DownloadPlan> {
     inspect_batch_with_progress(source_url, settings, |_| {})
 }
@@ -325,7 +331,7 @@ pub fn download_batch_with_abort(
     plan: DownloadPlan,
     settings: Settings,
     events: Sender<DownloadEvent>,
-    abort_requests: Receiver<usize>,
+    abort_requests: Receiver<AbortRequest>,
 ) -> Result<Project> {
     let total_attempts = settings.max_retries.saturating_add(1).max(1);
     let concurrency_limit = download_concurrency_limit(&plan);
@@ -339,11 +345,21 @@ pub fn download_batch_with_abort(
         let mut next_index = 0;
 
         loop {
-            for index in abort_requests.try_iter() {
-                if let Some(abort_tx) = active.get(&index) {
-                    let _ = abort_tx.send(());
-                } else if index >= next_index && index < plan.items.len() {
-                    pending_aborts.insert(index);
+            for request in abort_requests.try_iter() {
+                match request {
+                    AbortRequest::Item(index) => {
+                        if let Some(abort_tx) = active.get(&index) {
+                            let _ = abort_tx.send(());
+                        } else if index >= next_index && index < plan.items.len() {
+                            pending_aborts.insert(index);
+                        }
+                    }
+                    AbortRequest::Batch => {
+                        for abort_tx in active.values() {
+                            let _ = abort_tx.send(());
+                        }
+                        pending_aborts.extend(next_index..plan.items.len());
+                    }
                 }
             }
 

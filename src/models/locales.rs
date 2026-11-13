@@ -18,6 +18,7 @@ pub enum Label {
     Preferences,
     Init,
     TargetFolder,
+    Channel,
     MediaType,
     UnknownType,
     SingleVideo,
@@ -100,7 +101,7 @@ pub enum Label {
 }
 
 impl Label {
-    const ALL: [Self; 92] = [
+    const ALL: [Self; 93] = [
         Self::File,
         Self::New,
         Self::Open,
@@ -114,6 +115,7 @@ impl Label {
         Self::Preferences,
         Self::Init,
         Self::TargetFolder,
+        Self::Channel,
         Self::MediaType,
         Self::UnknownType,
         Self::SingleVideo,
@@ -210,6 +212,7 @@ impl Label {
             Self::Preferences => "preferences",
             Self::Init => "init",
             Self::TargetFolder => "target_folder",
+            Self::Channel => "channel",
             Self::MediaType => "media_type",
             Self::UnknownType => "unknown_type",
             Self::SingleVideo => "single_video",
