@@ -27,6 +27,10 @@ cargo run
 
 Releases are built for Windows x64 by GitHub Actions. The release workflow runs the tests, builds the application, packages it with Inno Setup, and attaches the installer to a GitHub Release.
 
+To build the installer locally with Inno Setup installed, run `.\scripts\build-installer.ps1` in PowerShell. The installer is written to `dist/`.
+
+The application icon is maintained as `src/resources/icon.svg`. Its rendered `src/resources/icon.png` is used for the application window, and `src/resources/icon.ico` is embedded in the Windows executable and installer. Regenerate both rendered files when changing the SVG.
+
 To publish a release, make sure the version in `Cargo.toml` is the intended release version, then push a matching version tag (for example, `v0.1.0`). The workflow rejects tags that do not match the Cargo package version.
 
 After the GitHub Release is available, submit its installer URL to the [Windows Package Manager Community Repository](https://github.com/microsoft/winget-pkgs) using Microsoft's [WinGet manifest guide](https://learn.microsoft.com/en-us/windows/package-manager/package/manifest). The proposed package ID is `Riory.RVideoFetcher`; confirm it is available before submitting. WinGet users will also need `yt-dlp` and `ffmpeg`; the app's Init tab lists the commands to install them.
@@ -35,7 +39,7 @@ After the GitHub Release is available, submit its installer URL to the [Windows 
 
 Install the recommended Rust Analyzer and LLDB-DAP extensions. To run the app without a debugger, use **Terminal → Run Task → Run r-video-fetcher**; this runs `cargo run` and does not require LLDB-DAP. **F5** (or **Ctrl+F5**) uses the LLDB-DAP launch configuration and requires `lldb-dap.exe` at the configured path.
 
-The app's **File** menu supports New/Open/Save/Exit for `.dwnl` project files, with recent projects and Ctrl+N/Ctrl+O/Ctrl+S shortcuts; Exit also works with Alt+F4 and saves the current URL. The **Download** menu supports clipboard downloads and a modal history with URL reuse and confirmed clearing. Preferences are grouped into Download and User interface; the UI language is currently English only, with Default, Dark, and Zenburn themes. Preference changes save automatically; the Init tab lists the dependency commands.
+The app's **File** menu supports New/Open/Save/Exit for `.dwnl` project files, with recent projects and Ctrl+N/Ctrl+O/Ctrl+S shortcuts; Exit also works with Alt+F4 and saves the current URL. The **Download** menu supports clipboard downloads and a modal history with URL reuse and confirmed clearing. Preferences are grouped into Download and User interface; the UI supports English and Russian, with Default, Dark, and Zenburn themes. Preference changes save automatically; the Init tab lists the dependency commands.
 
 The main window's position and size are saved on exit and restored on startup, clamped to the current monitor.
 
@@ -54,12 +58,15 @@ Inspection uses the system temporary directory for yt-dlp's temporary files; dow
 - Settings: `%APPDATA%\r-video-fetcher\settings.json`
 - Download history: `%LOCALAPPDATA%\r-video-fetcher\history\*.dwnl`
 
-History files are JSON and include the batch URL, total downloaded size, and a separate download log. The app displays the ten most recent batches.
+History files are JSON and include the batch URL, total downloaded size, and a separate download log. The app displays the ten most recent batches, formatting individual download sizes for display without changing stored logs.
 Use a history entry's **Use this URL again** button to prefill a previous batch URL.
 Project files store the URL, detected media type, target folder, estimated/downloaded size, and download log; the ten most recent project files appear in **File → Recent**.
 
 ## Project structure
 
+- Shared settings and types are in `src/models/structs.rs`.
+- Download state is in `src/models/download_session.rs`; inspection and downloads run through `src/models/download_engine.rs`.
+- Formatting, locale loading, and storage modules are under `src/models/`.
 - Each dialog is implemented in its own file under `src/dialogs/`.
 - English and Russian UI resources are stored separately in `src/locales/`.
 - Unit tests are grouped under `tests/unit/`; integration tests are grouped under `tests/integration/`.
@@ -67,18 +74,18 @@ Project files store the URL, detected media type, target folder, estimated/downl
 ## Validate
 
 ```powershell
-cargo fmt -- --check
-cargo test
-cargo build
+.\scripts\verify.ps1
 ```
+
+This formats Rust files, checks formatting, runs the default tests, and builds the application.
 
 The live YouTube integration tests require network access, `yt-dlp`, and `ffmpeg`; they inspect live metadata, estimate playlist sizes, and download media. They are ignored by default. Run them explicitly with:
 
 ```powershell
-cargo test --target-dir target/pre-push-tests --test integration -- --ignored --test-threads=1
+.\scripts\test-integration.ps1
 ```
 
-The Git pre-push hook runs only the tests under `tests/unit/`; it excludes `tests/integration/`. Enable the repository hook after cloning with:
+The Git pre-push hook runs the verification script. It formats files in the working tree, checks formatting, runs the default tests, and builds; live integration tests remain excluded. Enable the repository hook after cloning with:
 
 ```powershell
 git config core.hooksPath .githooks

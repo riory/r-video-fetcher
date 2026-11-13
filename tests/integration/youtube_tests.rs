@@ -1,6 +1,8 @@
 use r_video_fetcher::{
-    downloader::{DownloadPlan, download_batch, download_output_directory, inspect_batch},
-    model::Settings,
+    models::download_engine::{
+        DownloadPlan, download_batch, download_output_directory, inspect_batch,
+    },
+    models::structs::Settings,
 };
 use std::{
     collections::HashSet,

@@ -1,4 +1,4 @@
-use crate::model::MediaOverrides;
+use crate::models::structs::MediaOverrides;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{

@@ -11,6 +11,7 @@ AppName={#AppName}
 AppVersion={#AppVersion}
 DefaultDirName={autopf}\r-video-fetcher
 DefaultGroupName={#AppName}
+SetupIconFile=..\src\resources\icon.ico
 UninstallDisplayIcon={app}\{#AppExeName}
 OutputDir=..\dist
 OutputBaseFilename=r-video-fetcher-setup-{#AppVersion}

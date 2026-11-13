@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-labelledby="title">
+  <title id="title">Video download</title>
+  <rect x="8" y="8" width="240" height="240" rx="52" fill="#3f3f3f"/>
+  <rect x="35" y="57" width="166" height="126" rx="18" fill="#262626" stroke="#dcdccc" stroke-width="8"/>
+  <path d="M101 90v60l49-30z" fill="#dcdccc"/>
+  <circle cx="181" cy="177" r="52" fill="#3f3f3f"/>
+  <circle cx="181" cy="177" r="44" fill="#5f7f5f"/>
+  <path d="M181 148v39m-16-16 16 16 16-16m-34 34h36" fill="none" stroke="#8cd0d3" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

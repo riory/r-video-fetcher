@@ -75,6 +75,7 @@
   "mono": "Mono",
   "stereo": "Stereo",
   "english": "English",
+  "russian": "Russian",
   "enter_url": "Enter a video or playlist URL.",
   "choose_folder_preview": "Choose a download folder before previewing.",
   "clipboard_invalid": "The clipboard does not contain a valid HTTP(S) URL.",

@@ -1,9 +1,9 @@
 use crate::{
-    formatting::format_bytes,
-    locales::{Label, LocaleStrings},
-    model::Language,
+    models::formatting::{format_bytes, format_download_log_message},
+    models::locales::{Label, LocaleStrings},
     models::project::{DownloadLogEntry, HistoryRecord},
-    storage,
+    models::storage,
+    models::structs::Language,
 };
 use anyhow::Result;
 use eframe::egui;
@@ -132,7 +132,9 @@ impl HistoryDialog {
                                                 ui.label(message);
                                             }
                                             DownloadLogEntry::DownloadMessage { message } => {
-                                                ui.label(message);
+                                                ui.label(
+                                                    format_download_log_message(message).as_ref(),
+                                                );
                                             }
                                         }
                                     }

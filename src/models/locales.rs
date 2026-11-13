@@ -1,4 +1,4 @@
-use crate::model::Language;
+use crate::models::structs::Language;
 use anyhow::{Context, Result, anyhow};
 use std::collections::HashMap;
 
@@ -81,6 +81,7 @@ pub enum Label {
     Mono,
     Stereo,
     English,
+    Russian,
     EnterUrl,
     ChooseFolderPreview,
     ClipboardInvalid,
@@ -96,7 +97,7 @@ pub enum Label {
 }
 
 impl Label {
-    const ALL: [Self; 88] = [
+    const ALL: [Self; 89] = [
         Self::File,
         Self::New,
         Self::Open,
@@ -173,6 +174,7 @@ impl Label {
         Self::Mono,
         Self::Stereo,
         Self::English,
+        Self::Russian,
         Self::EnterUrl,
         Self::ChooseFolderPreview,
         Self::ClipboardInvalid,
@@ -265,6 +267,7 @@ impl Label {
             Self::Mono => "mono",
             Self::Stereo => "stereo",
             Self::English => "english",
+            Self::Russian => "russian",
             Self::EnterUrl => "enter_url",
             Self::ChooseFolderPreview => "choose_folder_preview",
             Self::ClipboardInvalid => "clipboard_invalid",
@@ -283,18 +286,24 @@ impl Label {
 
 pub struct LocaleStrings {
     english: [&'static str; Label::ALL.len()],
+    russian: [&'static str; Label::ALL.len()],
 }
 
 impl LocaleStrings {
     pub fn load() -> Result<Self> {
         Ok(Self {
-            english: parse_locale(include_str!("locales/en.json"))
+            english: parse_locale(include_str!("../locales/en.json"))
                 .context("Could not load English resources.")?,
+            russian: parse_locale(include_str!("../locales/ru.json"))
+                .context("Could not load Russian resources.")?,
         })
     }
 
-    pub fn text(&self, _language: Language, label: Label) -> &'static str {
-        self.english[label as usize]
+    pub fn text(&self, language: Language, label: Label) -> &'static str {
+        match language {
+            Language::English => self.english[label as usize],
+            Language::Russian => self.russian[label as usize],
+        }
     }
 }
 

@@ -1,11 +1,11 @@
 use r_video_fetcher::{
     app::{parse_clipboard_url, suggested_project_file_name},
-    model::{
+    models::structs::{
         AppTheme, AudioChannels, AudioSampleRate, FileType, MediaOverrides, Settings,
         VideoResolution, WindowState,
     },
     models::{
-        download::{DownloadPlan, DownloadSession, MediaItem, progress_weights},
+        download_session::{DownloadPlan, DownloadSession, MediaItem, progress_weights},
         project::{MediaType, ProjectState},
     },
     themes,

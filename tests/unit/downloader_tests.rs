@@ -1,10 +1,10 @@
 use r_video_fetcher::{
-    downloader::{
+    models::download_engine::{
         DownloadPlan, download_concurrency_limit, download_output_directory, file_type_args,
         find_downloaded_file, format_selector, parse_metadata, parse_progress_percent,
         sanitize_path_component,
     },
-    model::{AudioChannels, AudioSampleRate, FileType, Settings, VideoResolution},
+    models::structs::{AudioChannels, AudioSampleRate, FileType, Settings, VideoResolution},
 };
 use std::{
     env, fs,

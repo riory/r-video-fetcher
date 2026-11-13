@@ -1,10 +1,7 @@
 pub mod app;
 pub mod dialogs;
-pub mod downloader;
-pub mod formatting;
-pub mod locales;
-pub mod model;
 pub mod models;
-pub mod storage;
+pub use models::structs as model;
+pub use models::{download_engine as downloader, formatting, locales, storage};
 pub mod themes;
 mod tool_command;

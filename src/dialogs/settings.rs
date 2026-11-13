@@ -1,7 +1,7 @@
 use crate::{
     dialogs::folder_picker,
-    locales::{Label, LocaleStrings},
-    model::{
+    models::locales::{Label, LocaleStrings},
+    models::structs::{
         AppTheme, AudioChannels, AudioSampleRate, FileType, Language, MAX_RETRIES, Settings,
         VideoResolution,
     },
@@ -48,6 +48,7 @@ impl SettingsDialog {
         let preferences_label = text(locales, settings.language, Label::Preferences);
         let init_label = text(locales, settings.language, Label::Init);
         egui::Window::new(text(locales, settings.language, Label::Settings))
+            .id(egui::Id::new("settings_dialog"))
             .open(&mut open)
             .default_size([640.0, 560.0])
             .min_size([640.0, 560.0])
@@ -88,6 +89,7 @@ fn show_preferences(
     let default_theme_label = text(locales, language, Label::DefaultTheme);
     let dark_label = text(locales, language, Label::Dark);
     let english_label = text(locales, language, Label::English);
+    let russian_label = text(locales, language, Label::Russian);
     let file_type_label = text(locales, language, Label::FileType);
     let mono_label = text(locales, language, Label::Mono);
     let mp4_label = text(locales, language, Label::Mp4);
@@ -225,7 +227,23 @@ fn show_preferences(
             .spacing([12.0, 8.0])
             .show(ui, |ui| {
                 ui.label(text(locales, language, Label::Language));
-                ui.label(english_label);
+                egui::ComboBox::from_id_salt("ui_language")
+                    .selected_text(match settings.language {
+                        Language::English => english_label,
+                        Language::Russian => russian_label,
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut settings.language,
+                            Language::English,
+                            english_label,
+                        );
+                        ui.selectable_value(
+                            &mut settings.language,
+                            Language::Russian,
+                            russian_label,
+                        );
+                    });
                 ui.end_row();
 
                 ui.label(theme_label);

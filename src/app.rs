@@ -4,18 +4,19 @@ use crate::{
         open_project as open_project_dialog, save_project as save_project_dialog,
         settings::SettingsDialog,
     },
-    downloader::{self, DownloadEvent, InspectionProgress},
-    formatting::format_bytes,
-    locales::{Label, LocaleStrings},
-    model::{
+    models::structs::{
         AppTheme, AudioChannels, AudioSampleRate, MediaOverrides, Settings, VideoResolution,
         WindowState,
     },
     models::{
-        download::{DownloadItemStatus, DownloadSession},
+        download_engine::{self, DownloadEvent, InspectionProgress},
+        download_session::{DownloadItemStatus, DownloadSession},
+        formatting::format_bytes,
+        locales::{Label, LocaleStrings},
         project::{MediaType, Project, ProjectState},
+        storage,
     },
-    storage, themes,
+    themes,
 };
 use eframe::egui::{self, Color32};
 use std::{
@@ -193,10 +194,11 @@ impl VideoFetcherApp {
         let url = self.project_state.source_url().trim().to_owned();
         let events = self.events_tx.clone();
         thread::spawn(move || {
-            let result = downloader::inspect_batch_with_progress(&url, &settings, |progress| {
-                let _ = events.send(DownloadEvent::InspectionProgress(progress));
-            })
-            .map_err(|error| format!("{error:#}"));
+            let result =
+                download_engine::inspect_batch_with_progress(&url, &settings, |progress| {
+                    let _ = events.send(DownloadEvent::InspectionProgress(progress));
+                })
+                .map_err(|error| format!("{error:#}"));
             let _ = events.send(DownloadEvent::PlanReady(result));
         });
     }
@@ -216,9 +218,13 @@ impl VideoFetcherApp {
         let (abort_tx, abort_rx) = mpsc::channel();
         self.abort_tx = Some(abort_tx);
         thread::spawn(move || {
-            let result =
-                downloader::download_batch_with_abort(plan, settings, events.clone(), abort_rx)
-                    .map_err(|error| format!("{error:#}"));
+            let result = download_engine::download_batch_with_abort(
+                plan,
+                settings,
+                events.clone(),
+                abort_rx,
+            )
+            .map_err(|error| format!("{error:#}"));
             let _ = events.send(DownloadEvent::Finished(result));
         });
     }
@@ -465,12 +471,12 @@ impl VideoFetcherApp {
                                 plan.source_url.clone(),
                                 plan.estimated_bytes,
                                 target_folder,
-                                plan.items
-                                    .first()
-                                    .map(|item| downloader::sanitize_path_component(&item.channel)),
+                                plan.items.first().map(|item| {
+                                    download_engine::sanitize_path_component(&item.channel)
+                                }),
                                 plan.playlist_name
                                     .as_deref()
-                                    .map(downloader::sanitize_path_component),
+                                    .map(download_engine::sanitize_path_component),
                                 if plan.playlist_name.is_some() {
                                     MediaType::Playlist
                                 } else {
@@ -1123,8 +1129,8 @@ impl eframe::App for VideoFetcherApp {
 pub fn suggested_project_file_name(channel: &str, title: &str) -> String {
     format!(
         "{}-{}.dwnl",
-        downloader::sanitize_path_component(channel),
-        downloader::sanitize_path_component(title)
+        download_engine::sanitize_path_component(channel),
+        download_engine::sanitize_path_component(title)
     )
 }
 

@@ -1,7 +1,11 @@
 use r_video_fetcher::{
-    model::{AudioChannels, AudioSampleRate, MediaOverrides, Settings, VideoResolution},
     models::project::{DownloadLogEntry, HistoryRecord, MediaType},
-    storage::{clear_history_from, load_recent_history_from, remember_recent_file, write_json},
+    models::storage::{
+        clear_history_from, load_recent_history_from, remember_recent_file, write_json,
+    },
+    models::structs::{
+        AudioChannels, AudioSampleRate, Language, MediaOverrides, Settings, VideoResolution,
+    },
 };
 use std::{
     env, fs,
@@ -136,4 +140,38 @@ fn settings_without_recent_projects_keep_compatibility() {
 
     assert!(settings.recent_files.is_empty());
     assert_eq!(settings.max_retries, 3);
+}
+
+#[test]
+fn language_preference_is_saved_and_restored() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let path = env::temp_dir().join(format!(
+        "r-video-fetcher-language-{}-{unique}.json",
+        std::process::id()
+    ));
+    let settings = Settings {
+        language: Language::Russian,
+        ..Settings::default()
+    };
+
+    write_json(&path, &settings).unwrap();
+    let saved = fs::read_to_string(&path).unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&saved).unwrap()["language"],
+        "russian"
+    );
+    assert_eq!(
+        serde_json::from_str::<Settings>(&saved).unwrap().language,
+        Language::Russian
+    );
+    assert_eq!(
+        serde_json::from_str::<Settings>(r#"{"language":"english"}"#)
+            .unwrap()
+            .language,
+        Language::English
+    );
+    fs::remove_file(path).unwrap();
 }

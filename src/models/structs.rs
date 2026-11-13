@@ -189,6 +189,6 @@ impl AudioChannels {
 #[serde(rename_all = "snake_case")]
 pub enum Language {
     #[default]
-    #[serde(alias = "russian")]
     English,
+    Russian,
 }

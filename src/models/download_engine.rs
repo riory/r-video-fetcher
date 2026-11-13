@@ -1,7 +1,8 @@
 use crate::{
-    model::{FileType, Settings},
     models::project::{DownloadLogEntry, MediaType, Project},
-    storage, tool_command,
+    models::storage,
+    models::structs::{FileType, Settings},
+    tool_command,
 };
 use anyhow::{Context, Result, anyhow, bail};
 use fs2::available_space;
@@ -18,7 +19,7 @@ use std::{
 };
 use url::Url;
 
-pub use crate::models::download::{DownloadPlan, MediaItem};
+pub use crate::models::download_session::{DownloadPlan, MediaItem};
 
 const OUTPUT_MARKER: &str = "__R_VIDEO_FETCHER_OUTPUT__";
 const INSPECTION_TIMEOUT: Duration = Duration::from_secs(300);

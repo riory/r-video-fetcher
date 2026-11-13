@@ -1,6 +1,6 @@
 use crate::{
-    model::{MAX_RETRIES, Settings},
     models::project::HistoryRecord,
+    models::structs::{MAX_RETRIES, Settings},
 };
 use anyhow::{Context, Result, anyhow};
 use std::{

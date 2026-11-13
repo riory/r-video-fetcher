@@ -2,7 +2,7 @@ mod dark;
 mod default;
 mod zenburn;
 
-use crate::model::AppTheme;
+use crate::models::structs::AppTheme;
 use eframe::egui;
 
 pub fn visuals(theme: AppTheme) -> egui::Visuals {

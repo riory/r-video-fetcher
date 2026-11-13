@@ -48,7 +48,7 @@ Settings:
     - audio sample rate and channels default to "From source video"
     - file format: "From source video" (default) / MP4 (recode)
 - User interface
-    - UI language (English only)
+    - UI language (English or Russian)
     - Theme (default/dark/Zenburn)
 
 Coding guidelines:
@@ -59,7 +59,7 @@ Coding guidelines:
 - tests should be separate from source code, use top-level 'tests' folder
 - each form/dialog should be in a separate file
 - resource strings should be stored separately from code, each locale should be stored as separate file under 'src/locales' folder
-- keep the locale resource lookup in place; only English is currently supported
+- keep the locale resource lookup in place for English and Russian
 - DO NOT CUT CORNERS!
     - no ad-hoc string parsing when proper object property can be used
 
