@@ -1,57 +1,46 @@
 use crate::{
     dialogs::{
-        folder_picker, open_project as open_project_dialog, save_project as save_project_dialog,
-        settings::{SettingsAction, SettingsDialog},
+        history::{HistoryDialog, HistoryDialogAction},
+        open_project as open_project_dialog, save_project as save_project_dialog,
+        settings::SettingsDialog,
     },
-    downloader::{self, DownloadEvent, DownloadPlan},
+    downloader::{self, DownloadEvent, InspectionProgress},
+    formatting::format_bytes,
     locales::{Label, LocaleStrings},
     model::{
-        AudioChannels, AudioSampleRate, HistoryRecord, MediaOverrides, MediaType, Settings,
-        VideoResolution,
+        AppTheme, AudioChannels, AudioSampleRate, MediaOverrides, Settings, VideoResolution,
+        WindowState,
     },
-    storage,
+    models::{
+        download::{DownloadItemStatus, DownloadSession},
+        project::{MediaType, Project, ProjectState},
+    },
+    storage, themes,
 };
 use eframe::egui::{self, Color32};
 use std::{
-    env, fs,
     path::PathBuf,
-    process::Command,
     sync::mpsc::{self, Receiver, Sender},
     thread,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 use url::Url;
-
-const INSTALLER_SCRIPT: &str = include_str!("../scripts/install-dependencies.ps1");
 
 pub struct VideoFetcherApp {
     locales: LocaleStrings,
     settings: Settings,
-    media_overrides: Option<MediaOverrides>,
+    applied_theme: Option<AppTheme>,
+    pending_window_state: Option<WindowState>,
     default_folder_text: String,
-    target_folder_text: String,
-    source_url: String,
-    current_project: HistoryRecord,
-    current_project_path: Option<PathBuf>,
-    history: Vec<HistoryRecord>,
-    plan: Option<DownloadPlan>,
-    progress: Vec<FileProgress>,
+    project_state: ProjectState,
+    history_dialog: HistoryDialog,
+    download_session: DownloadSession,
     events_tx: Sender<DownloadEvent>,
     events_rx: Receiver<DownloadEvent>,
-    planning: bool,
-    downloading: bool,
-    download_after_inspection: bool,
+    abort_tx: Option<Sender<usize>>,
     settings_dialog: SettingsDialog,
     status: String,
     error: Option<String>,
-}
-
-#[derive(Clone)]
-struct FileProgress {
-    title: String,
-    percent: f32,
-    weight: f64,
-    status: String,
 }
 
 enum MenuAction {
@@ -62,6 +51,8 @@ enum MenuAction {
     FromClipboard,
     OpenRecent(PathBuf),
     ShowSettings,
+    ShowHistory,
+    ConfirmClearHistory,
 }
 
 impl VideoFetcherApp {
@@ -88,27 +79,23 @@ impl VideoFetcherApp {
             }
         };
         let default_folder_text = settings.download_root.to_string_lossy().into_owned();
-        let target_folder_text = settings.download_root.to_string_lossy().into_owned();
+        let batch_settings = MediaOverrides::from(&settings);
+        let pending_window_state = settings.window_state;
         let (events_tx, events_rx) = mpsc::channel();
-        let current_project = empty_project(settings.download_root.clone());
+        let project_state = ProjectState::new(settings.download_root.clone(), batch_settings);
 
         Self {
             locales,
             settings,
-            media_overrides: None,
+            applied_theme: None,
+            pending_window_state,
             default_folder_text,
-            target_folder_text,
-            source_url: String::new(),
-            current_project,
-            current_project_path: None,
-            history,
-            plan: None,
-            progress: Vec::new(),
+            project_state,
+            history_dialog: HistoryDialog::new(history),
+            download_session: DownloadSession::default(),
             events_tx,
             events_rx,
-            planning: false,
-            downloading: false,
-            download_after_inspection: false,
+            abort_tx: None,
             settings_dialog: SettingsDialog::default(),
             status: String::new(),
             error: (!errors.is_empty()).then(|| errors.join("\n")),
@@ -119,71 +106,137 @@ impl VideoFetcherApp {
         self.locales.text(self.settings.language, label)
     }
 
-    fn start_inspection(&mut self) {
-        self.current_project.url = self.source_url.trim().to_owned();
-        self.current_project.target_folder = PathBuf::from(self.target_folder_text.trim());
-        if self.source_url.trim().is_empty() {
-            self.download_after_inspection = false;
+    fn batch_settings(&self) -> MediaOverrides {
+        self.project_state
+            .project()
+            .media_overrides
+            .unwrap_or_else(|| MediaOverrides::from(&self.settings))
+    }
+
+    fn apply_theme(&mut self, context: &egui::Context) {
+        if self.applied_theme != Some(self.settings.theme) {
+            context.set_visuals(themes::visuals(self.settings.theme));
+            self.applied_theme = Some(self.settings.theme);
+            context.request_repaint();
+        }
+    }
+
+    fn restore_window_state(&mut self, context: &egui::Context) {
+        let Some(window_state) = self.pending_window_state else {
+            return;
+        };
+        let (monitor_size, outer_rect, inner_rect) = context.input(|input| {
+            let viewport = input.viewport();
+            (
+                viewport.monitor_size,
+                viewport.outer_rect,
+                viewport.inner_rect,
+            )
+        });
+        let (Some(monitor_size), Some(outer_rect), Some(inner_rect)) =
+            (monitor_size, outer_rect, inner_rect)
+        else {
+            context.request_repaint_after(Duration::from_millis(100));
+            return;
+        };
+        let decorations = [
+            (outer_rect.width() - inner_rect.width()).max(0.0),
+            (outer_rect.height() - inner_rect.height()).max(0.0),
+        ];
+        let clamped = window_state.clamp_to([monitor_size.x, monitor_size.y], decorations);
+        let max_inner_size = [
+            (monitor_size.x - decorations[0]).max(1.0),
+            (monitor_size.y - decorations[1]).max(1.0),
+        ];
+
+        context.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(egui::vec2(
+            640.0_f32.min(max_inner_size[0]),
+            560.0_f32.min(max_inner_size[1]),
+        )));
+        context.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(
+            clamped.x, clamped.y,
+        )));
+        context.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
+            clamped.width,
+            clamped.height,
+        )));
+        self.pending_window_state = None;
+    }
+
+    fn start_inspection(&mut self, auto_download: bool) {
+        self.project_state.set_suggested_file_name(None);
+        if self.project_state.source_url().trim().is_empty() {
+            self.download_session.cancel_auto_download();
             self.error = Some(self.text(Label::EnterUrl).to_owned());
             return;
         }
-        if self.current_project.target_folder.as_os_str().is_empty() {
-            self.download_after_inspection = false;
+        if self
+            .project_state
+            .project()
+            .target_folder
+            .as_os_str()
+            .is_empty()
+        {
+            self.download_session.cancel_auto_download();
             self.error = Some(self.text(Label::ChooseFolderPreview).to_owned());
             return;
         }
 
+        let target_folder = self.project_state.project().target_folder.clone();
+        let batch_settings = self.batch_settings();
+        self.project_state.set_inputs(target_folder, batch_settings);
         self.error = None;
         self.status = self.text(Label::Planning).to_owned();
-        self.plan = None;
-        self.progress.clear();
         let mut settings = self.settings.clone();
-        settings.download_root = self.current_project.target_folder.clone();
-        self.planning = true;
-        let url = self.source_url.trim().to_owned();
+        settings.download_root = self.project_state.project().target_folder.clone();
+        self.download_session.begin_inspection(auto_download);
+        let url = self.project_state.source_url().trim().to_owned();
         let events = self.events_tx.clone();
         thread::spawn(move || {
-            let result =
-                downloader::inspect_batch(&url, &settings).map_err(|error| format!("{error:#}"));
+            let result = downloader::inspect_batch_with_progress(&url, &settings, |progress| {
+                let _ = events.send(DownloadEvent::InspectionProgress(progress));
+            })
+            .map_err(|error| format!("{error:#}"));
             let _ = events.send(DownloadEvent::PlanReady(result));
         });
     }
 
     fn start_download(&mut self) {
-        let Some(plan) = self.plan.take() else {
+        let Some(plan) = self.download_session.begin_download() else {
             return;
         };
-        self.current_project.url = plan.source_url.clone();
-        self.current_project.target_folder = PathBuf::from(self.target_folder_text.trim());
-        self.progress = initial_progress(&plan, self.text(Label::Ready));
+        let batch_settings = self.batch_settings();
         self.error = None;
         self.status = self.text(Label::Downloading).to_owned();
-        self.downloading = true;
         let mut settings = self.settings.clone();
-        settings.download_root = self.current_project.target_folder.clone();
-        if let Some(overrides) = self.media_overrides.take() {
-            settings.apply_media_overrides(overrides);
-        }
+        settings.download_root = self.project_state.project().target_folder.clone();
+        settings.apply_media_overrides(batch_settings);
+        self.project_state.set_media_overrides(batch_settings);
         let events = self.events_tx.clone();
+        let (abort_tx, abort_rx) = mpsc::channel();
+        self.abort_tx = Some(abort_tx);
         thread::spawn(move || {
-            let result = downloader::download_batch(plan, settings, events.clone())
-                .map_err(|error| format!("{error:#}"));
+            let result =
+                downloader::download_batch_with_abort(plan, settings, events.clone(), abort_rx)
+                    .map_err(|error| format!("{error:#}"));
             let _ = events.send(DownloadEvent::Finished(result));
         });
     }
 
-    fn save_defaults(&mut self) {
+    fn save_settings(&mut self) {
+        let previous_download_root = self.settings.download_root.clone();
         let default_folder = PathBuf::from(self.default_folder_text.trim());
-        if default_folder.as_os_str().is_empty() {
-            self.error = Some(self.text(Label::ChooseFolderSave).to_owned());
-            return;
+        if !default_folder.as_os_str().is_empty() {
+            self.settings.download_root = default_folder;
         }
-        self.settings.download_root = default_folder;
         match storage::save_settings(&self.settings) {
             Ok(()) => {
-                if self.current_project_path.is_none() && self.source_url.is_empty() {
-                    self.target_folder_text = self.default_folder_text.clone();
-                    self.current_project.target_folder = self.settings.download_root.clone();
+                if self.settings.download_root != previous_download_root
+                    && self.project_state.path().is_none()
+                    && self.project_state.source_url().is_empty()
+                {
+                    self.project_state
+                        .set_target_folder(self.settings.download_root.clone());
                 }
                 self.error = None;
                 self.status.clear();
@@ -192,19 +245,39 @@ impl VideoFetcherApp {
         }
     }
 
+    fn save_window_state(&mut self, context: &egui::Context) -> anyhow::Result<()> {
+        let (outer_rect, inner_rect) = context.input(|input| {
+            let viewport = input.viewport();
+            (viewport.outer_rect, viewport.inner_rect)
+        });
+        let outer_rect = outer_rect.ok_or_else(|| {
+            anyhow::anyhow!("Could not determine the main window's outer rectangle.")
+        })?;
+        let inner_rect = inner_rect.ok_or_else(|| {
+            anyhow::anyhow!("Could not determine the main window's inner rectangle.")
+        })?;
+        self.settings.window_state = Some(WindowState {
+            x: outer_rect.min.x,
+            y: outer_rect.min.y,
+            width: inner_rect.width(),
+            height: inner_rect.height(),
+        });
+        storage::save_settings(&self.settings)
+    }
+
     fn new_project(&mut self) {
-        self.current_project = empty_project(self.settings.download_root.clone());
-        self.current_project_path = None;
-        self.media_overrides = None;
-        self.target_folder_text = self.settings.download_root.to_string_lossy().into_owned();
-        self.source_url.clear();
-        self.plan = None;
-        self.progress.clear();
+        self.project_state.reset(
+            self.settings.download_root.clone(),
+            MediaOverrides::from(&self.settings),
+        );
+        self.history_dialog.close();
+        self.download_session.clear();
         self.error = None;
         self.status.clear();
     }
 
     fn open_project_dialog(&mut self) {
+        self.new_project();
         if let Some(path) = open_project_dialog::open_project() {
             self.open_project(&path);
         }
@@ -212,18 +285,16 @@ impl VideoFetcherApp {
 
     fn open_project(&mut self, path: &std::path::Path) {
         match storage::load_project(path) {
-            Ok(project) => {
-                self.target_folder_text = if project.target_folder.as_os_str().is_empty() {
-                    self.settings.download_root.to_string_lossy().into_owned()
-                } else {
-                    project.target_folder.to_string_lossy().into_owned()
-                };
-                self.source_url = project.url.clone();
-                self.current_project = project;
-                self.current_project_path = Some(path.to_owned());
-                self.media_overrides = None;
-                self.plan = None;
-                self.progress.clear();
+            Ok(mut project) => {
+                if project.target_folder.as_os_str().is_empty() {
+                    project.target_folder = self.settings.download_root.clone();
+                }
+                let batch_settings = project
+                    .media_overrides
+                    .unwrap_or_else(|| MediaOverrides::from(&self.settings));
+                project.set_media_overrides(batch_settings);
+                self.project_state.open(project, path.to_owned());
+                self.download_session.clear();
                 self.error = None;
                 self.status = self
                     .text(Label::OpenProjectStatus)
@@ -237,11 +308,18 @@ impl VideoFetcherApp {
     }
 
     fn save_project_dialog(&mut self) {
-        let suggested_name = if self.current_project.batch_name.is_empty() {
-            "download.dwnl".to_owned()
-        } else {
-            format!("{}.dwnl", self.current_project.batch_name)
-        };
+        let suggested_name = self
+            .project_state
+            .suggested_file_name()
+            .map(str::to_owned)
+            .unwrap_or_else(|| {
+                let batch_name = if self.project_state.project().batch_name.is_empty() {
+                    "video"
+                } else {
+                    &self.project_state.project().batch_name
+                };
+                suggested_project_file_name("Unknown", batch_name)
+            });
         if let Some(path) = save_project_dialog::save_project(&suggested_name) {
             match self.save_project_to(&path) {
                 Ok(()) => {
@@ -255,7 +333,7 @@ impl VideoFetcherApp {
     }
 
     fn save_project(&mut self) {
-        if let Some(path) = self.current_project_path.clone() {
+        if let Some(path) = self.project_state.path().map(PathBuf::from) {
             match self.save_project_to(&path) {
                 Ok(()) => {
                     self.status = self
@@ -270,26 +348,67 @@ impl VideoFetcherApp {
     }
 
     fn save_current_project_if_named(&mut self) -> anyhow::Result<()> {
-        if let Some(path) = self.current_project_path.clone() {
+        if let Some(path) = self.project_state.path().map(PathBuf::from) {
             self.save_project_to(&path)?;
         }
         Ok(())
     }
 
     fn save_project_to(&mut self, path: &std::path::Path) -> anyhow::Result<()> {
-        self.current_project.url = self.source_url.trim().to_owned();
-        self.current_project.target_folder = PathBuf::from(self.target_folder_text.trim());
-        if self.current_project.created_at_unix_seconds == 0 {
-            self.current_project.created_at_unix_seconds = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map_err(|error| anyhow::anyhow!("System clock is invalid: {error}"))?
-                .as_secs();
+        self.project_state.prepare_for_save(self.batch_settings())?;
+        if self.project_state.path().is_none() && path.exists() {
+            self.project_state.set_path(path.to_owned());
+            self.remember_project(path)?;
+            return Ok(());
         }
-        storage::save_project(path, &self.current_project)?;
-        self.current_project_path = Some(path.to_owned());
+        storage::save_project(path, self.project_state.project())?;
+        self.project_state.set_path(path.to_owned());
         self.remember_project(path)?;
         self.error = None;
         Ok(())
+    }
+
+    fn save_project_for_clipboard(&mut self) -> anyhow::Result<()> {
+        let Some(file_name) = self.project_state.suggested_file_name().map(str::to_owned) else {
+            return Err(anyhow::anyhow!(
+                "Could not derive a project file name from inspected media."
+            ));
+        };
+        if self.project_state.path().is_none() {
+            let path = storage::projects_directory()?.join(file_name);
+            self.save_project_to(&path)?;
+        } else {
+            self.save_current_project_if_named()?;
+        }
+        Ok(())
+    }
+
+    fn save_project_before_exit(&mut self) -> anyhow::Result<()> {
+        if self.project_state.source_url().trim().is_empty() {
+            return Ok(());
+        }
+        let path = match self.project_state.path().map(PathBuf::from) {
+            Some(path) => path,
+            None => {
+                let file_name = self
+                    .project_state
+                    .suggested_file_name()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| {
+                        let url_component = Url::parse(self.project_state.source_url().trim())
+                            .ok()
+                            .and_then(|url| {
+                                url.query_pairs()
+                                    .find(|(key, _)| key == "v")
+                                    .map(|(_, value)| value.into_owned())
+                            })
+                            .unwrap_or_else(|| "video".to_owned());
+                        suggested_project_file_name("Unknown", &url_component)
+                    });
+                storage::projects_directory()?.join(file_name)
+            }
+        };
+        self.save_project_to(&path)
     }
 
     fn remember_project(&mut self, path: &std::path::Path) -> anyhow::Result<()> {
@@ -298,7 +417,7 @@ impl VideoFetcherApp {
     }
 
     fn download_from_clipboard(&mut self) {
-        if self.planning || self.downloading {
+        if self.download_session.is_busy() {
             return;
         }
         let clipboard_text =
@@ -320,104 +439,51 @@ impl VideoFetcherApp {
             }
         };
         self.new_project();
-        self.source_url = clipboard_url;
-        self.current_project.url = self.source_url.clone();
-        self.current_project_path = match storage::clipboard_project_path() {
-            Ok(path) => Some(path),
-            Err(error) => {
-                self.error = Some(format!("{error:#}"));
-                return;
-            }
-        };
-        if let Err(error) = self.save_current_project_if_named() {
-            self.error = Some(format!("{error:#}"));
-            return;
-        }
-        self.download_after_inspection = true;
-        self.start_inspection();
-    }
-
-    fn choose_target_folder(&mut self) {
-        let initial_folder = PathBuf::from(self.target_folder_text.trim());
-        if let Some(folder) = folder_picker::choose_folder(&initial_folder) {
-            self.target_folder_text = folder.to_string_lossy().into_owned();
-            self.current_project.target_folder = folder;
-            self.plan = None;
-        }
-    }
-
-    fn launch_dependency_installer(&mut self) {
-        let Some(local_app_data) = env::var_os("LOCALAPPDATA").map(PathBuf::from) else {
-            self.error = Some(self.text(Label::LocalAppDataMissing).to_owned());
-            return;
-        };
-        let script = local_app_data
-            .join("r-video-fetcher")
-            .join("scripts")
-            .join("install-dependencies.ps1");
-        let Some(script_directory) = script.parent() else {
-            self.error = Some(self.text(Label::InstallerDirectoryMissing).to_owned());
-            return;
-        };
-        if let Err(error) =
-            fs::create_dir_all(script_directory).and_then(|()| fs::write(&script, INSTALLER_SCRIPT))
-        {
-            self.error = Some(
-                self.text(Label::InstallerPrepareError)
-                    .replace("{path}", &script.display().to_string())
-                    .replace("{error}", &error.to_string()),
-            );
-            return;
-        }
-        match Command::new("powershell.exe")
-            .args([
-                "-NoProfile",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-NoExit",
-                "-File",
-            ])
-            .arg(&script)
-            .spawn()
-        {
-            Ok(_) => {
-                self.error = None;
-                self.status = self.text(Label::InstallerOpened).to_owned();
-            }
-            Err(error) => {
-                self.error = Some(
-                    self.text(Label::InstallerLaunchError)
-                        .replace("{error}", &error.to_string()),
-                )
-            }
-        }
+        self.project_state.set_url(&clipboard_url);
+        self.start_inspection(true);
     }
 
     fn poll_events(&mut self) {
         while let Ok(event) = self.events_rx.try_recv() {
             match event {
                 DownloadEvent::PlanReady(result) => {
-                    self.planning = false;
+                    let auto_download = self.download_session.finish_inspection();
                     match result {
                         Ok(plan) => {
                             let plan_status =
                                 format!("{}: {}", self.text(Label::Plan), plan.batch_name);
-                            self.progress = initial_progress(&plan, self.text(Label::Ready));
+                            self.project_state
+                                .set_suggested_file_name(plan.items.first().map(|item| {
+                                    suggested_project_file_name(&item.channel, &item.title)
+                                }));
                             self.status = plan_status.clone();
                             self.error = None;
-                            self.current_project.batch_name = plan.batch_name.clone();
-                            self.current_project.url = plan.source_url.clone();
-                            self.current_project.size_bytes = plan.estimated_bytes;
-                            self.current_project.target_folder =
-                                PathBuf::from(self.target_folder_text.trim());
-                            self.current_project.media_type =
-                                Some(if plan.playlist_name.is_some() {
+                            let target_folder = self.project_state.project().target_folder.clone();
+                            let batch_settings = self.batch_settings();
+                            self.project_state.apply_preview(
+                                plan.batch_name.clone(),
+                                plan.source_url.clone(),
+                                plan.estimated_bytes,
+                                target_folder,
+                                plan.items
+                                    .first()
+                                    .map(|item| downloader::sanitize_path_component(&item.channel)),
+                                plan.playlist_name
+                                    .as_deref()
+                                    .map(downloader::sanitize_path_component),
+                                if plan.playlist_name.is_some() {
                                     MediaType::Playlist
                                 } else {
                                     MediaType::SingleVideo
-                                });
-                            self.plan = Some(plan);
-                            let project_saved = match self.save_current_project_if_named() {
+                                },
+                                batch_settings,
+                            );
+                            self.download_session.set_plan(plan);
+                            let project_saved = match if auto_download {
+                                self.save_project_for_clipboard()
+                            } else {
+                                self.save_current_project_if_named()
+                            } {
                                 Ok(()) => true,
                                 Err(error) => {
                                     self.error = Some(format!("{error:#}"));
@@ -425,75 +491,90 @@ impl VideoFetcherApp {
                                 }
                             };
                             self.status = plan_status;
-                            if self.download_after_inspection {
-                                self.download_after_inspection = false;
-                                if project_saved {
-                                    self.start_download();
-                                }
+                            if auto_download && project_saved {
+                                self.start_download();
                             }
                         }
                         Err(error) => {
-                            self.download_after_inspection = false;
+                            self.download_session.clear();
                             self.error = Some(error);
-                            self.plan = None;
                         }
                     }
+                }
+                DownloadEvent::InspectionProgress(progress) => {
+                    self.status = match progress {
+                        InspectionProgress::CheckingTools => {
+                            self.text(Label::CheckingTools).to_owned()
+                        }
+                        InspectionProgress::FetchingMetadata => {
+                            self.text(Label::FetchingMetadata).to_owned()
+                        }
+                        InspectionProgress::EstimatingItems {
+                            completed,
+                            total,
+                            active,
+                            unavailable,
+                        } => self
+                            .text(Label::EstimatingItems)
+                            .replace("{completed}", &completed.to_string())
+                            .replace("{total}", &total.to_string())
+                            .replace("{active}", &active.to_string())
+                            .replace("{unavailable}", &unavailable.to_string()),
+                        InspectionProgress::CheckingDiskSpace => {
+                            self.text(Label::CheckingDiskSpace).to_owned()
+                        }
+                    };
                 }
                 DownloadEvent::AttemptStarted {
                     index,
                     attempt,
                     total_attempts,
-                } => {
-                    let status = self.text(Label::AttemptStatus).to_owned();
-                    if let Some(file) = self.progress.get_mut(index) {
-                        file.percent = 0.0;
-                        file.status = status
-                            .replace("{attempt}", &attempt.to_string())
-                            .replace("{total_attempts}", &total_attempts.to_string());
-                    }
-                }
+                } => self
+                    .download_session
+                    .mark_attempt_started(index, attempt, total_attempts),
                 DownloadEvent::Progress { index, percent } => {
-                    if let Some(file) = self.progress.get_mut(index) {
-                        file.percent = percent;
-                    }
+                    self.download_session.report_progress(index, percent);
                 }
                 DownloadEvent::ItemCompleted { index, size_bytes } => {
-                    let status = self.text(Label::CompleteStatus).to_owned();
-                    if let Some(file) = self.progress.get_mut(index) {
-                        file.percent = 100.0;
-                        file.status = status.replace("{size}", &format_bytes(size_bytes));
-                    }
+                    self.download_session.mark_completed(index, size_bytes);
                 }
+                DownloadEvent::ItemVerifying { index } => {
+                    self.download_session.mark_verifying(index)
+                }
+                DownloadEvent::ItemAborted { index } => self.download_session.mark_aborted(index),
                 DownloadEvent::ItemFailed { index, message } => {
-                    if let Some(file) = self.progress.get_mut(index) {
-                        if message.starts_with("Failed after") {
-                            file.percent = 100.0;
-                        }
-                        file.status = message;
-                    }
+                    let retrying = !message.starts_with("Failed after");
+                    self.download_session.mark_failed(index, message, retrying);
                 }
                 DownloadEvent::Finished(result) => {
-                    self.downloading = false;
+                    self.download_session.finish_download();
+                    self.abort_tx = None;
                     match result {
-                        Ok(record) => {
-                            let failed = self
-                                .progress
-                                .iter()
-                                .filter(|file| file.status.starts_with("Failed"))
-                                .count();
+                        Ok(mut record) => {
                             self.status = self
                                 .text(Label::FinishedStatus)
                                 .replace("{status}", self.text(Label::Completed))
-                                .replace("{files}", &self.progress.len().to_string())
-                                .replace("{failed}", &failed.to_string())
+                                .replace(
+                                    "{files}",
+                                    &self.download_session.items().len().to_string(),
+                                )
+                                .replace(
+                                    "{failed}",
+                                    &self.download_session.failed_count().to_string(),
+                                )
+                                .replace(
+                                    "{aborted}",
+                                    &self.download_session.aborted_count().to_string(),
+                                )
                                 .replace("{size}", &format_bytes(record.size_bytes));
-                            self.current_project = record.clone();
+                            record.set_media_overrides(self.batch_settings());
+                            self.project_state.replace_project(record.clone());
                             self.error = None;
                             if let Err(error) = self.save_current_project_if_named() {
                                 self.error = Some(format!("{error:#}"));
                             }
                             match storage::load_recent_history() {
-                                Ok(history) => self.history = history,
+                                Ok(history) => self.history_dialog.set_history(history),
                                 Err(error) => self.error = Some(format!("{error:#}")),
                             }
                         }
@@ -505,23 +586,24 @@ impl VideoFetcherApp {
     }
 
     fn show_settings_dialog(&mut self, context: &egui::Context) {
-        let action = self.settings_dialog.show(
+        let previous_settings = self.settings.clone();
+        let previous_default_folder = self.default_folder_text.clone();
+        self.settings_dialog.show(
             context,
             &mut self.settings,
             &mut self.default_folder_text,
             &self.locales,
         );
-        match action {
-            Some(SettingsAction::SaveDefaults) => self.save_defaults(),
-            Some(SettingsAction::InstallDependencies) => self.launch_dependency_installer(),
-            None => {}
+        if self.settings != previous_settings || self.default_folder_text != previous_default_folder
+        {
+            self.save_settings();
         }
     }
 
     fn show_menu_bar(&mut self, context: &egui::Context) -> Option<MenuAction> {
         let mut action = None;
         let recent_files = self.settings.recent_files.clone();
-        let busy = self.planning || self.downloading;
+        let busy = self.download_session.is_busy();
         let file_label = self.text(Label::File);
         let new_label = self.text(Label::New);
         let open_label = self.text(Label::Open);
@@ -530,6 +612,8 @@ impl VideoFetcherApp {
         let exit_label = self.text(Label::Exit);
         let download_label = self.text(Label::DownloadMenu);
         let clipboard_label = self.text(Label::FromClipboard);
+        let history_label = self.text(Label::History);
+        let clear_history_label = self.text(Label::ClearHistory);
         let settings_label = self.text(Label::Settings);
 
         egui::TopBottomPanel::top("app_menu_bar").show(context, |ui| {
@@ -594,6 +678,15 @@ impl VideoFetcherApp {
                         action = Some(MenuAction::FromClipboard);
                         ui.close();
                     }
+                    ui.separator();
+                    if ui.button(history_label).clicked() {
+                        action = Some(MenuAction::ShowHistory);
+                        ui.close();
+                    }
+                    if ui.button(clear_history_label).clicked() {
+                        action = Some(MenuAction::ConfirmClearHistory);
+                        ui.close();
+                    }
                 });
                 if ui.button(settings_label).clicked() {
                     action = Some(MenuAction::ShowSettings);
@@ -612,11 +705,13 @@ impl VideoFetcherApp {
             MenuAction::FromClipboard => self.download_from_clipboard(),
             MenuAction::OpenRecent(path) => self.open_project(&path),
             MenuAction::ShowSettings => self.settings_dialog.open(),
+            MenuAction::ShowHistory => self.history_dialog.open(),
+            MenuAction::ConfirmClearHistory => self.history_dialog.confirm_clear(),
         }
     }
 
     fn show_plan(&mut self, ui: &mut egui::Ui) {
-        let Some(plan) = &self.plan else {
+        let Some(plan) = self.download_session.plan() else {
             return;
         };
         let warning = plan.estimated_bytes > plan.free_bytes || plan.unknown_size_count > 0;
@@ -670,77 +765,106 @@ impl VideoFetcherApp {
                 self.start_download();
             }
             if ui.button(self.text(Label::CancelPreview)).clicked() {
-                self.plan = None;
-                self.progress.clear();
+                self.download_session.clear();
             }
         });
     }
 
-    fn show_progress(&self, ui: &mut egui::Ui) {
-        if self.progress.is_empty() {
+    fn show_progress(&mut self, ui: &mut egui::Ui) {
+        if !self.download_session.has_progress() {
             return;
         }
         ui.separator();
         ui.heading(self.text(Label::BatchProgress));
-        let total_weight = self.progress.iter().map(|file| file.weight).sum::<f64>();
-        let overall = self
-            .progress
-            .iter()
-            .map(|file| file.percent as f64 * file.weight)
-            .sum::<f64>()
-            / total_weight;
-        ui.add(egui::ProgressBar::new((overall / 100.0) as f32).text(format!("{overall:.1}%")));
-        for file in &self.progress {
-            ui.label(&file.title);
-            ui.add(
-                egui::ProgressBar::new(file.percent / 100.0)
-                    .text(format!("{:.1}% - {}", file.percent, file.status)),
-            );
-        }
-    }
-
-    fn show_history(&mut self, ui: &mut egui::Ui) {
-        ui.separator();
-        ui.heading(self.text(Label::History));
-        if self.history.is_empty() {
-            ui.label(self.text(Label::Ready));
-            return;
-        }
-        let history = self.history.clone();
-        let reuse_label = self.text(Label::Reuse);
-        for (index, record) in history.into_iter().enumerate() {
-            egui::CollapsingHeader::new(format!(
-                "{}. {} - {}",
-                index + 1,
-                record.batch_name,
-                format_bytes(record.size_bytes)
-            ))
-            .id_salt(("history", index))
+        let overall = self.download_session.overall_progress();
+        ui.add(egui::ProgressBar::new(overall / 100.0).text(format!("{overall:.1}%")));
+        let abort_label = self.text(Label::Abort).to_owned();
+        let downloading = self.download_session.is_downloading();
+        let mut abort_index = None;
+        egui::ScrollArea::vertical()
+            .id_salt("batch_progress_items")
+            .max_height(ui.available_height())
             .show(ui, |ui| {
-                ui.label(&record.url);
-                if ui
-                    .add_enabled(
-                        !self.planning && !self.downloading,
-                        egui::Button::new(reuse_label),
-                    )
-                    .clicked()
-                {
-                    self.source_url = record.url.clone();
-                    self.plan = None;
-                    self.progress.clear();
-                    self.error = None;
-                }
-                for line in &record.download_log {
-                    ui.label(line);
+                for (index, item) in self.download_session.items().iter().enumerate() {
+                    let status = self.progress_status_text(&item.status);
+                    ui.horizontal(|ui| {
+                        ui.label(&item.title);
+                        if ui
+                            .add_enabled(
+                                downloading && item.can_abort,
+                                egui::Button::new(&abort_label),
+                            )
+                            .clicked()
+                        {
+                            abort_index = Some(index);
+                        }
+                    });
+                    ui.add(
+                        egui::ProgressBar::new(item.percent / 100.0)
+                            .text(format!("{:.1}% - {status}", item.percent)),
+                    );
                 }
             });
+        if let Some(index) = abort_index {
+            match self.abort_tx.as_ref().map(|sender| sender.send(index)) {
+                Some(Ok(())) => {
+                    self.download_session.mark_aborting(index);
+                }
+                Some(Err(error)) => {
+                    self.error = Some(format!(
+                        "Could not abort download item {}: {error}",
+                        index + 1
+                    ));
+                }
+                None => self.error = Some("Download cancellation is unavailable.".to_owned()),
+            }
         }
     }
 
-    fn show_media_overrides(&mut self, ui: &mut egui::Ui) {
-        let override_label = self.text(Label::BatchOverrides).to_owned();
-        let note = self.text(Label::BatchOverridesNote).to_owned();
-        let any_label = self.text(Label::Any).to_owned();
+    fn progress_status_text(&self, status: &DownloadItemStatus) -> String {
+        match status {
+            DownloadItemStatus::Ready => self.text(Label::Ready).to_owned(),
+            DownloadItemStatus::Attempt {
+                attempt,
+                total_attempts,
+            } => self
+                .text(Label::AttemptStatus)
+                .replace("{attempt}", &attempt.to_string())
+                .replace("{total_attempts}", &total_attempts.to_string()),
+            DownloadItemStatus::Verifying => self.text(Label::VerifyingStatus).to_owned(),
+            DownloadItemStatus::Completed { size_bytes } => self
+                .text(Label::CompleteStatus)
+                .replace("{size}", &format_bytes(*size_bytes)),
+            DownloadItemStatus::Aborting => self.text(Label::AbortingStatus).to_owned(),
+            DownloadItemStatus::Aborted => self.text(Label::AbortedStatus).to_owned(),
+            DownloadItemStatus::Failed { message, .. } => message.clone(),
+        }
+    }
+
+    fn show_history_dialog(&mut self, context: &egui::Context) {
+        let busy = self.download_session.is_busy();
+        match self
+            .history_dialog
+            .show(context, &self.locales, self.settings.language, busy)
+        {
+            Ok(Some(HistoryDialogAction::Reuse(record))) => self.reuse_history_record(record),
+            Ok(Some(HistoryDialogAction::Cleared)) => self.error = None,
+            Ok(None) => {}
+            Err(error) => self.error = Some(format!("{error:#}")),
+        }
+    }
+
+    fn reuse_history_record(&mut self, record: Project) {
+        self.new_project();
+        self.project_state.set_url(&record.url);
+        if !record.target_folder.as_os_str().is_empty() {
+            self.project_state.set_target_folder(record.target_folder);
+        }
+    }
+
+    fn show_batch_settings(&mut self, ui: &mut egui::Ui) {
+        let mut batch_settings = self.batch_settings();
+        let from_source_video_label = self.text(Label::FromSourceVideo).to_owned();
         let best_label = self.text(Label::Best).to_owned();
         let video_resolution_label = self.text(Label::VideoResolution).to_owned();
         let audio_sample_rate_label = self.text(Label::AudioSampleRate).to_owned();
@@ -760,28 +884,13 @@ impl VideoFetcherApp {
             self.text(Label::SampleRate48000).to_owned(),
         ];
 
-        let mut enabled = self.media_overrides.is_some();
-        if ui.checkbox(&mut enabled, override_label).changed() {
-            self.media_overrides = if enabled {
-                Some(MediaOverrides {
-                    video_resolution: self.settings.video_resolution,
-                    audio_sample_rate: self.settings.audio_sample_rate,
-                    audio_channels: self.settings.audio_channels,
-                })
-            } else {
-                None
-            };
-        }
-        let Some(overrides) = self.media_overrides.as_mut() else {
-            return;
-        };
-        ui.small(note);
-        egui::Grid::new("batch_media_overrides")
+        let mut changed = false;
+        egui::Grid::new("batch_settings")
             .num_columns(2)
             .spacing([12.0, 8.0])
             .show(ui, |ui| {
                 ui.label(&video_resolution_label);
-                let selected_resolution = match overrides.video_resolution {
+                let selected_resolution = match batch_settings.video_resolution {
                     VideoResolution::Best => &best_label,
                     VideoResolution::P360 => &resolution_labels[0],
                     VideoResolution::P480 => &resolution_labels[1],
@@ -793,11 +902,13 @@ impl VideoFetcherApp {
                 egui::ComboBox::from_id_salt("batch_video_resolution")
                     .selected_text(selected_resolution)
                     .show_ui(ui, |ui| {
-                        ui.selectable_value(
-                            &mut overrides.video_resolution,
-                            VideoResolution::Best,
-                            &best_label,
-                        );
+                        changed |= ui
+                            .selectable_value(
+                                &mut batch_settings.video_resolution,
+                                VideoResolution::Best,
+                                &best_label,
+                            )
+                            .changed();
                         for (resolution, label) in [
                             (VideoResolution::P360, &resolution_labels[0]),
                             (VideoResolution::P480, &resolution_labels[1]),
@@ -806,74 +917,97 @@ impl VideoFetcherApp {
                             (VideoResolution::P1440, &resolution_labels[4]),
                             (VideoResolution::P2160, &resolution_labels[5]),
                         ] {
-                            ui.selectable_value(&mut overrides.video_resolution, resolution, label);
+                            changed |= ui
+                                .selectable_value(
+                                    &mut batch_settings.video_resolution,
+                                    resolution,
+                                    label,
+                                )
+                                .changed();
                         }
                     });
                 ui.end_row();
 
                 ui.label(&audio_sample_rate_label);
-                let selected_sample_rate = match overrides.audio_sample_rate {
-                    AudioSampleRate::Any => &any_label,
+                let selected_sample_rate = match batch_settings.audio_sample_rate {
+                    AudioSampleRate::FromSourceVideo => &from_source_video_label,
                     AudioSampleRate::Hz44100 => &sample_rate_labels[0],
                     AudioSampleRate::Hz48000 => &sample_rate_labels[1],
                 };
                 egui::ComboBox::from_id_salt("batch_audio_sample_rate")
                     .selected_text(selected_sample_rate)
                     .show_ui(ui, |ui| {
-                        ui.selectable_value(
-                            &mut overrides.audio_sample_rate,
-                            AudioSampleRate::Any,
-                            &any_label,
-                        );
-                        ui.selectable_value(
-                            &mut overrides.audio_sample_rate,
-                            AudioSampleRate::Hz44100,
-                            &sample_rate_labels[0],
-                        );
-                        ui.selectable_value(
-                            &mut overrides.audio_sample_rate,
-                            AudioSampleRate::Hz48000,
-                            &sample_rate_labels[1],
-                        );
+                        changed |= ui
+                            .selectable_value(
+                                &mut batch_settings.audio_sample_rate,
+                                AudioSampleRate::FromSourceVideo,
+                                &from_source_video_label,
+                            )
+                            .changed();
+                        changed |= ui
+                            .selectable_value(
+                                &mut batch_settings.audio_sample_rate,
+                                AudioSampleRate::Hz44100,
+                                &sample_rate_labels[0],
+                            )
+                            .changed();
+                        changed |= ui
+                            .selectable_value(
+                                &mut batch_settings.audio_sample_rate,
+                                AudioSampleRate::Hz48000,
+                                &sample_rate_labels[1],
+                            )
+                            .changed();
                     });
                 ui.end_row();
 
                 ui.label(&audio_channels_label);
-                let selected_channels = match overrides.audio_channels {
-                    AudioChannels::Any => &any_label,
+                let selected_channels = match batch_settings.audio_channels {
+                    AudioChannels::FromSourceVideo => &from_source_video_label,
                     AudioChannels::Mono => &mono_label,
                     AudioChannels::Stereo => &stereo_label,
                 };
                 egui::ComboBox::from_id_salt("batch_audio_channels")
                     .selected_text(selected_channels)
                     .show_ui(ui, |ui| {
-                        ui.selectable_value(
-                            &mut overrides.audio_channels,
-                            AudioChannels::Any,
-                            &any_label,
-                        );
-                        ui.selectable_value(
-                            &mut overrides.audio_channels,
-                            AudioChannels::Mono,
-                            &mono_label,
-                        );
-                        ui.selectable_value(
-                            &mut overrides.audio_channels,
-                            AudioChannels::Stereo,
-                            &stereo_label,
-                        );
+                        changed |= ui
+                            .selectable_value(
+                                &mut batch_settings.audio_channels,
+                                AudioChannels::FromSourceVideo,
+                                &from_source_video_label,
+                            )
+                            .changed();
+                        changed |= ui
+                            .selectable_value(
+                                &mut batch_settings.audio_channels,
+                                AudioChannels::Mono,
+                                &mono_label,
+                            )
+                            .changed();
+                        changed |= ui
+                            .selectable_value(
+                                &mut batch_settings.audio_channels,
+                                AudioChannels::Stereo,
+                                &stereo_label,
+                            )
+                            .changed();
                     });
                 ui.end_row();
             });
+        if changed {
+            self.project_state.set_media_overrides(batch_settings);
+            if let Err(error) = self.save_current_project_if_named() {
+                self.error = Some(format!("{error:#}"));
+            }
+        }
     }
 }
 
 impl eframe::App for VideoFetcherApp {
     fn update(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
+        self.restore_window_state(context);
+        self.apply_theme(context);
         self.poll_events();
-        if self.planning || self.downloading {
-            context.request_repaint_after(Duration::from_millis(100));
-        }
 
         let mut menu_action = self.show_menu_bar(context);
         egui::TopBottomPanel::bottom("app_status_bar").show(context, |ui| {
@@ -885,7 +1019,7 @@ impl eframe::App for VideoFetcherApp {
                 ui.label(&self.status);
             }
         });
-        if !self.planning && !self.downloading {
+        if !self.download_session.is_busy() {
             let shortcuts = context.input_mut(|input| {
                 let new = input.consume_key(egui::Modifiers::CTRL, egui::Key::N);
                 let open = input.consume_key(egui::Modifiers::CTRL, egui::Key::O);
@@ -907,22 +1041,39 @@ impl eframe::App for VideoFetcherApp {
             self.handle_menu_action(action, context);
         }
 
+        let target_folder = self
+            .project_state
+            .project()
+            .target_folder
+            .to_string_lossy()
+            .into_owned();
+        let download_folder = self.project_state.project().download_folder();
+        let mut open_target_folder = None;
         egui::CentralPanel::default().show(context, |ui| {
-            ui.heading("r-video-fetcher");
-
-            let editor_enabled = !self.planning && !self.downloading && self.plan.is_none();
-            ui.add_enabled_ui(editor_enabled, |ui| {
-                ui.group(|ui| {
+            let editor_enabled =
+                !self.download_session.is_busy() && self.download_session.plan().is_none();
+            ui.group(|ui| {
+                ui.add_enabled_ui(editor_enabled, |ui| {
                     ui.label(self.text(Label::Url));
-                    ui.text_edit_singleline(&mut self.source_url);
+                    if ui
+                        .text_edit_singleline(self.project_state.source_url_mut())
+                        .changed()
+                    {
+                        self.project_state.commit_source_url();
+                        self.project_state.set_suggested_file_name(None);
+                    }
                     ui.separator();
-                    ui.horizontal(|ui| {
-                        ui.label(self.text(Label::TargetFolder));
-                        if ui.link(&self.target_folder_text).clicked() {
-                            self.choose_target_folder();
+                    ui.label(format!(
+                        "{}: {target_folder}",
+                        self.text(Label::TargetFolder)
+                    ));
+                    if let Some(folder) = &download_folder {
+                        let folder_label = folder.display().to_string();
+                        if ui.link(folder_label).clicked() {
+                            open_target_folder = Some(folder.clone());
                         }
-                    });
-                    let media_type = match self.current_project.media_type {
+                    }
+                    let media_type = match self.project_state.project().media_type {
                         Some(MediaType::SingleVideo) => self.text(Label::SingleVideo),
                         Some(MediaType::Playlist) => self.text(Label::Playlist),
                         None => self.text(Label::UnknownType),
@@ -930,45 +1081,51 @@ impl eframe::App for VideoFetcherApp {
                     ui.label(format!("{}: {media_type}", self.text(Label::MediaType)));
                     ui.horizontal(|ui| {
                         if ui.button(self.text(Label::Preview)).clicked() {
-                            self.start_inspection();
+                            self.start_inspection(false);
                         }
-                        if self.planning {
+                        if self.download_session.is_inspecting() {
                             ui.spinner();
                             ui.label(self.text(Label::Planning));
                         }
                     });
                 });
-                self.show_media_overrides(ui);
+                ui.separator();
+                ui.add_enabled_ui(!self.download_session.is_busy(), |ui| {
+                    self.show_batch_settings(ui);
+                });
             });
             self.show_plan(ui);
             self.show_progress(ui);
-            self.show_history(ui);
         });
+        if let Some(folder) = open_target_folder {
+            if let Err(error) = storage::open_folder(&folder) {
+                self.error = Some(format!("{error:#}"));
+            }
+        }
         self.show_settings_dialog(context);
+        self.apply_theme(context);
+        self.show_history_dialog(context);
+        if context.input(|input| input.viewport().close_requested()) {
+            if let Err(error) = self
+                .save_window_state(context)
+                .and_then(|()| self.save_project_before_exit())
+            {
+                self.error = Some(format!("{error:#}"));
+                context.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            }
+        }
+        if self.download_session.is_busy() {
+            context.request_repaint_after(Duration::from_millis(100));
+        }
     }
 }
 
-fn format_bytes(bytes: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
-    let mut value = bytes as f64;
-    let mut unit = 0;
-    while value >= 1024.0 && unit < UNITS.len() - 1 {
-        value /= 1024.0;
-        unit += 1;
-    }
-    format!("{value:.1} {}", UNITS[unit])
-}
-
-fn empty_project(target_folder: PathBuf) -> HistoryRecord {
-    HistoryRecord {
-        batch_name: String::new(),
-        url: String::new(),
-        created_at_unix_seconds: 0,
-        size_bytes: 0,
-        download_log: Vec::new(),
-        target_folder,
-        media_type: None,
-    }
+pub fn suggested_project_file_name(channel: &str, title: &str) -> String {
+    format!(
+        "{}-{}.dwnl",
+        downloader::sanitize_path_component(channel),
+        downloader::sanitize_path_component(title)
+    )
 }
 
 pub fn parse_clipboard_url(text: &str) -> Option<String> {
@@ -978,42 +1135,4 @@ pub fn parse_clipboard_url(text: &str) -> Option<String> {
     } else {
         None
     }
-}
-
-fn initial_progress(plan: &DownloadPlan, ready_label: &str) -> Vec<FileProgress> {
-    plan.items
-        .iter()
-        .zip(progress_weights(plan))
-        .map(|(item, weight)| FileProgress {
-            title: item.title.clone(),
-            percent: 0.0,
-            weight,
-            status: ready_label.to_owned(),
-        })
-        .collect()
-}
-
-pub fn progress_weights(plan: &DownloadPlan) -> Vec<f64> {
-    let known_sizes = plan
-        .items
-        .iter()
-        .filter_map(|item| item.estimated_bytes)
-        .collect::<Vec<_>>();
-    let fallback_weight = if known_sizes.is_empty() {
-        1.0
-    } else {
-        known_sizes
-            .iter()
-            .fold(0u64, |total, size| total.saturating_add(*size)) as f64
-            / known_sizes.len() as f64
-    };
-    plan.items
-        .iter()
-        .map(|item| {
-            item.estimated_bytes
-                .map(|size| size as f64)
-                .unwrap_or(fallback_weight)
-        })
-        .map(|weight| weight.max(1.0))
-        .collect()
 }

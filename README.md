@@ -15,7 +15,7 @@ See the [LLDB-DAP setup documentation](https://github.com/llvm/vscode-lldb#procu
 - Rust (to build and run from source)
 - `yt-dlp` and `ffmpeg` available on `PATH`
 
-The app reports a clear error if either executable is missing. Install them from **Settings → Init → Install dependencies with winget**, or run `scripts/install-dependencies.ps1` in PowerShell. The script uses the `yt-dlp.yt-dlp` and `Gyan.FFmpeg.Shared` winget packages.
+The app reports a clear error if either executable is missing. The **Settings → Init** tab lists the winget commands, or run `scripts/install-dependencies.ps1` in PowerShell. The script uses the `yt-dlp.yt-dlp` and `Gyan.FFmpeg.Shared` winget packages.
 
 ## Run
 
@@ -27,7 +27,9 @@ cargo run
 
 Install the recommended Rust Analyzer and LLDB-DAP extensions. To run the app without a debugger, use **Terminal → Run Task → Run r-video-fetcher**; this runs `cargo run` and does not require LLDB-DAP. **F5** (or **Ctrl+F5**) uses the LLDB-DAP launch configuration and requires `lldb-dap.exe` at the configured path.
 
-The app's **File** menu supports New/Open/Save/Exit for `.dwnl` project files, with recent projects and Ctrl+N/Ctrl+O/Ctrl+S shortcuts; Exit also works with Alt+F4. **Download → From clipboard** (Ctrl+B) creates a project from a valid clipboard URL and starts its download. The **Settings** menu opens Preferences and Init tabs.
+The app's **File** menu supports New/Open/Save/Exit for `.dwnl` project files, with recent projects and Ctrl+N/Ctrl+O/Ctrl+S shortcuts; Exit also works with Alt+F4 and saves the current URL. The **Download** menu supports clipboard downloads and a modal history with URL reuse and confirmed clearing. Preferences are grouped into Download and User interface; the UI language is currently English only, with Default, Dark, and Zenburn themes. Preference changes save automatically; the Init tab lists the dependency commands.
+
+The main window's position and size are saved on exit and restored on startup, clamped to the current monitor.
 
 Enter an HTTP(S) video or playlist URL, review the size and free-space estimate, then confirm the download. Files are organized under the configured root folder as:
 
@@ -35,7 +37,7 @@ Enter an HTTP(S) video or playlist URL, review the size and free-space estimate,
 <root>/<channel>/<playlist if applicable>/<title> [<id>].<extension>
 ```
 
-Quality and audio selections use the saved preferences by default. Enable **Override quality for this batch** in the workspace to choose one-off video resolution, audio sample rate, and channel settings without changing saved defaults. These preferences are applied through yt-dlp format selection. If the requested source formats are unavailable, yt-dlp may fall back to another available format.
+Video resolution, audio sample rate, and audio channels are always visible in the workspace and start with the saved preferences. Changing a selection updates the current project and immediately saves it when the project already has a `.dwnl` file; unsaved projects retain the selections until saved. Batch selections do not change global preferences. The global **File type** preference defaults to the source format or can recode downloads to MP4. These preferences are applied through yt-dlp; if the requested source formats are unavailable, yt-dlp may fall back to another available format.
 
 ## Settings and history
 

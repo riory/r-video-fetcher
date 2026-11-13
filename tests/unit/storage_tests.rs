@@ -1,6 +1,7 @@
 use r_video_fetcher::{
-    model::{HistoryRecord, MediaType, Settings},
-    storage::{remember_recent_file, write_json},
+    model::{AudioChannels, AudioSampleRate, MediaOverrides, Settings, VideoResolution},
+    models::project::{DownloadLogEntry, HistoryRecord, MediaType},
+    storage::{clear_history_from, load_recent_history_from, remember_recent_file, write_json},
 };
 use std::{
     env, fs,
@@ -21,9 +22,18 @@ fn writes_and_reads_json_history_files() {
         url: "https://example.com/video".to_owned(),
         created_at_unix_seconds: 1,
         size_bytes: 42,
-        download_log: vec!["Downloaded test video".to_owned()],
+        download_log: vec![DownloadLogEntry::DownloadMessage {
+            message: "Downloaded test video.".to_owned(),
+        }],
         target_folder: PathBuf::from("downloads"),
-        media_type: Some(MediaType::SingleVideo),
+        channel: Some("positionmusic".to_owned()),
+        playlist: Some("Konata_Small_Playlist".to_owned()),
+        media_type: Some(MediaType::Playlist),
+        media_overrides: Some(MediaOverrides {
+            video_resolution: VideoResolution::P720,
+            audio_sample_rate: AudioSampleRate::Hz44100,
+            audio_channels: AudioChannels::Mono,
+        }),
     };
 
     write_json(&path, &expected).unwrap();
@@ -34,25 +44,19 @@ fn writes_and_reads_json_history_files() {
     assert_eq!(actual.size_bytes, expected.size_bytes);
     assert_eq!(actual.download_log, expected.download_log);
     assert_eq!(actual.target_folder, expected.target_folder);
+    assert_eq!(actual.channel, expected.channel);
+    assert_eq!(actual.playlist, expected.playlist);
+    assert_eq!(
+        actual.download_folder(),
+        Some(
+            PathBuf::from("downloads")
+                .join("positionmusic")
+                .join("Konata_Small_Playlist")
+        )
+    );
     assert_eq!(actual.media_type, expected.media_type);
+    assert_eq!(actual.media_overrides, expected.media_overrides);
     fs::remove_dir_all(directory).unwrap();
-}
-
-#[test]
-fn loads_legacy_project_files_without_new_optional_fields() {
-    let project: HistoryRecord = serde_json::from_str(
-        r#"{
-            "batch_name": "Legacy",
-            "url": "https://example.com/video",
-            "created_at_unix_seconds": 1,
-            "size_bytes": 0,
-            "download_log": []
-        }"#,
-    )
-    .unwrap();
-
-    assert!(project.target_folder.as_os_str().is_empty());
-    assert_eq!(project.media_type, None);
 }
 
 #[test]
@@ -69,6 +73,60 @@ fn recent_projects_are_deduplicated_and_limited_to_ten() {
     assert_eq!(settings.recent_files.len(), 10);
     assert_eq!(settings.recent_files[0], paths[5]);
     assert!(!settings.recent_files.contains(&paths[0]));
+}
+
+#[test]
+fn recent_history_is_limited_to_ten_and_clear_preserves_non_history_files() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let directory = env::temp_dir().join(format!("r-video-fetcher-history-test-{unique}"));
+    fs::create_dir_all(&directory).unwrap();
+    for index in 0..12 {
+        let record = HistoryRecord {
+            batch_name: format!("Batch {index}"),
+            url: format!("https://example.com/{index}"),
+            created_at_unix_seconds: index,
+            size_bytes: index,
+            download_log: Vec::new(),
+            target_folder: PathBuf::new(),
+            channel: None,
+            playlist: None,
+            media_type: None,
+            media_overrides: None,
+        };
+        write_json(&directory.join(format!("batch-{index:02}.dwnl")), &record).unwrap();
+    }
+    let non_history_file = directory.join("notes.txt");
+    fs::write(&non_history_file, "keep").unwrap();
+    let non_history_directory = directory.join("archive.dwnl");
+    fs::create_dir(&non_history_directory).unwrap();
+
+    let recent = load_recent_history_from(&directory).unwrap();
+
+    assert_eq!(recent.len(), 10);
+    assert_eq!(recent[0].batch_name, "Batch 11");
+    assert_eq!(recent[9].batch_name, "Batch 2");
+    clear_history_from(&directory).unwrap();
+
+    assert!(non_history_file.is_file());
+    assert!(non_history_directory.is_dir());
+    assert_eq!(
+        fs::read_dir(&directory)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .path()
+                    .extension()
+                    .is_some_and(|extension| extension == "dwnl")
+                    && entry.path().is_file()
+            })
+            .count(),
+        0
+    );
+    fs::remove_dir_all(directory).unwrap();
 }
 
 #[test]

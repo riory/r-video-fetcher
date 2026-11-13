@@ -10,8 +10,10 @@ Scope: utility application / console application
 Features:
 - pass url to single video or playlist
 - for each video run download routine
+- download playlist items concurrently, with a maximum of 4 active downloads
 - should have default setting for audio (frequency, mono/stereo etc) and video (resolution, playback)
-    - should allow per-action override if requested, othervise use default
+    - always show batch settings initialized from saved global preferences
+    - persist each batch-setting change to the active saved project without changing global preferences
 - save to predetermined folder - default is {VIDEOHOST}/{CHANNEL-NAME}/{PLAYLIST if applicable}/{VIDEO DESCRIPTION}
     - alternativelty allow to save to specified folder on disc
 
@@ -22,19 +24,32 @@ Download feature:
 - each file should be retried up to X times (default to 3) if not - should fail and added to download report
 - for each video ensure that download is complete, verify file integrity
 - download process should be interactive (progress bar for each file and overall batch) 
+- provide an Abort control for each download item; aborting one item stops its retries and does not stop the rest of the batch
+- show inspection status in the status bar, including playlist metadata retrieval, per-item size estimation, and disk-space checks
+- estimate playlist item sizes concurrently and report completed, active, and unavailable item counts
 
 Local history:
 - each download should be saved for future reference and reuse, save as *.dwnl file
-    - use JSON format to store: batch name, url, size, separately download log
+    - use JSON format to store: batch name, url, size, target folder, channel, playlist, separately download log
+    - show one link to the composed target/channel/playlist folder after the "Use this URL again" button
+    - download log entries are plain text and do not contain folder links
 - files should be saved under current user app data location
 - GUI should allow to view last 10 download batches
 
+Window states:
+- on application exit save main window rect coordinates
+- on application start restore main window coordinates (clamp to current screen resolution)
+
 Settings:
-- download
+- Download
     - default root folder for downloads
     - max retry
     - audio/video resolution
-- ui language
+    - audio sample rate and channels default to "From source video"
+    - file format: "From source video" (default) / MP4 (recode)
+- User interface
+    - UI language (English only)
+    - Theme (default/dark/Zenburn)
 
 Coding guidelines:
 - use structured approach, ensure adhering to DRY and SOLID 
@@ -44,6 +59,9 @@ Coding guidelines:
 - tests should be separate from source code, use top-level 'tests' folder
 - each form/dialog should be in a separate file
 - resource strings should be stored separately from code, each locale should be stored as separate file under 'src/locales' folder
+- keep the locale resource lookup in place; only English is currently supported
+- DO NOT CUT CORNERS!
+    - no ad-hoc string parsing when proper object property can be used
 
 UI:
 - main window
@@ -58,7 +76,7 @@ UI:
                 - Save current project to file, file name should be in format {channel}-{video name}.dwnl
                     - if matched with existing file, do not re-create
             - --separator--
-            - Recent (list of recent files)
+            - Recent (list of recently opened files)
             - --separator--
             - Exit (Alt-F4)
                 - Save current project if url is not empty
@@ -75,9 +93,16 @@ UI:
                 - download list should be scrollable
                 - start download
                 - save to recent
+            - --separator--
+            - Show history
+                - opens new modal window with download history
+            - Clear history
+                - should show confirmation dialog
+                    - if confirmed, clear all recent downloads
         - Settings
             - on click opens modal window with Settings
                 - tab 1: Preferences (lists global preferences)
+                    - group download preferences separately from UI preferences
                     - Changing any value should trigger automatic save
                     - No confirm button
                 - tab 2: Init (lists commands to initiate ps1 script that calls winget to install necessary dependencies (e.g. yt-dlp))
@@ -88,8 +113,12 @@ UI:
     - list type (playlist/single video)                
     - target folder (should be hyperlink that on click opens system directory search dialog, on close updates target folder)
         - default to settings value
+    - always show batch video resolution, audio sample rate, and audio channel settings
     - button to start download
         - on click, start download, update progress bars (current file, overall batch)      
+        - show an Abort button per item; disable it when the item is verifying or has completed, failed, or been aborted
+    - should be spread out, colors should be contrasting
+    - only shows current project, no history
 
 - status bar
     - Contains single label that shows current status/events/errors

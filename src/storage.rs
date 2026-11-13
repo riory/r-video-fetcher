@@ -1,10 +1,16 @@
-use crate::model::{HistoryRecord, MAX_RETRIES, Settings};
+use crate::{
+    model::{MAX_RETRIES, Settings},
+    models::project::HistoryRecord,
+};
 use anyhow::{Context, Result, anyhow};
 use std::{
     env, fs,
     path::{Path, PathBuf},
+    process::Command,
     time::{SystemTime, UNIX_EPOCH},
 };
+
+const RECENT_HISTORY_LIMIT: usize = 10;
 
 pub fn default_settings() -> Result<Settings> {
     let profile = env::var_os("USERPROFILE")
@@ -51,7 +57,10 @@ pub fn save_settings(settings: &Settings) -> Result<()> {
 }
 
 pub fn load_recent_history() -> Result<Vec<HistoryRecord>> {
-    let directory = history_directory()?;
+    load_recent_history_from(&history_directory()?)
+}
+
+pub fn load_recent_history_from(directory: &Path) -> Result<Vec<HistoryRecord>> {
     let entries = match fs::read_dir(&directory) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -61,19 +70,28 @@ pub fn load_recent_history() -> Result<Vec<HistoryRecord>> {
         }
     };
 
-    let mut files = entries
+    let files = entries
         .map(|entry| entry.map(|entry| entry.path()))
         .collect::<std::io::Result<Vec<_>>>()
         .with_context(|| format!("Could not list history folder {}", directory.display()))?;
-    files.retain(|path| {
-        path.extension()
-            .is_some_and(|extension| extension == "dwnl")
-    });
+    let mut files = files
+        .into_iter()
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "dwnl")
+        })
+        .filter_map(|path| match fs::metadata(&path) {
+            Ok(metadata) if metadata.is_file() => Some(Ok(path)),
+            Ok(_) => None,
+            Err(error) => Some(Err(error)),
+        })
+        .collect::<std::io::Result<Vec<_>>>()
+        .with_context(|| format!("Could not inspect history folder {}", directory.display()))?;
     files.sort_by_key(|path| path.file_name().unwrap_or_default().to_os_string());
     files.reverse();
     files
         .into_iter()
-        .take(10)
+        .take(RECENT_HISTORY_LIMIT)
         .map(|path| {
             let contents = fs::read_to_string(&path)
                 .with_context(|| format!("Could not read history file {}", path.display()))?;
@@ -81,6 +99,49 @@ pub fn load_recent_history() -> Result<Vec<HistoryRecord>> {
                 .with_context(|| format!("Could not parse history file {}", path.display()))
         })
         .collect()
+}
+
+pub fn clear_history() -> Result<()> {
+    clear_history_from(&history_directory()?)
+}
+
+pub fn open_history_folder() -> Result<()> {
+    let directory = history_directory()?;
+    fs::create_dir_all(&directory)
+        .with_context(|| format!("Could not create history folder {}", directory.display()))?;
+    open_folder(&directory)
+}
+
+pub fn open_folder(path: &Path) -> Result<()> {
+    launch_folder(path)
+}
+
+pub fn clear_history_from(directory: &Path) -> Result<()> {
+    let entries = match fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("Could not read history folder {}", directory.display()));
+        }
+    };
+
+    for entry in entries {
+        let path = entry
+            .with_context(|| format!("Could not list history folder {}", directory.display()))?
+            .path();
+        if path
+            .extension()
+            .is_some_and(|extension| extension == "dwnl")
+            && fs::metadata(&path)
+                .with_context(|| format!("Could not inspect history file {}", path.display()))?
+                .is_file()
+        {
+            fs::remove_file(&path)
+                .with_context(|| format!("Could not remove history file {}", path.display()))?;
+        }
+    }
+    Ok(())
 }
 
 pub fn save_history(record: &HistoryRecord) -> Result<()> {
@@ -116,13 +177,8 @@ pub fn save_project(path: &Path, project: &HistoryRecord) -> Result<()> {
     write_json(path, project).with_context(|| format!("Could not save project {}", path.display()))
 }
 
-pub fn clipboard_project_path() -> Result<PathBuf> {
-    let directory = app_data_directory("LOCALAPPDATA")?.join("projects");
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .context("System clock is earlier than the Unix epoch.")?
-        .as_nanos();
-    Ok(directory.join(format!("clipboard-{timestamp}.dwnl")))
+pub fn projects_directory() -> Result<PathBuf> {
+    app_data_directory("LOCALAPPDATA").map(|directory| directory.join("projects"))
 }
 
 pub fn remember_recent_file(settings: &mut Settings, path: &Path) {
@@ -147,6 +203,40 @@ fn settings_path() -> Result<PathBuf> {
 
 fn history_directory() -> Result<PathBuf> {
     app_data_directory("LOCALAPPDATA").map(|directory| directory.join("history"))
+}
+
+#[cfg(target_os = "windows")]
+fn launch_folder(path: &Path) -> Result<()> {
+    Command::new("explorer")
+        .arg(path)
+        .spawn()
+        .with_context(|| format!("Could not open folder {}", path.display()))?;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn launch_folder(path: &Path) -> Result<()> {
+    Command::new("open")
+        .arg(path)
+        .spawn()
+        .with_context(|| format!("Could not open folder {}", path.display()))?;
+    Ok(())
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn launch_folder(path: &Path) -> Result<()> {
+    Command::new("xdg-open")
+        .arg(path)
+        .spawn()
+        .with_context(|| format!("Could not open folder {}", path.display()))?;
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos", unix)))]
+fn launch_folder(_path: &Path) -> Result<()> {
+    Err(anyhow!(
+        "Opening the history folder is not supported on this platform."
+    ))
 }
 
 fn app_data_directory(variable: &str) -> Result<PathBuf> {

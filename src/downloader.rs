@@ -1,46 +1,46 @@
 use crate::{
-    model::{HistoryRecord, MediaType, Settings},
+    model::{FileType, Settings},
+    models::project::{DownloadLogEntry, MediaType, Project},
     storage,
 };
 use anyhow::{Context, Result, anyhow, bail};
 use fs2::available_space;
 use serde_json::Value;
 use std::{
+    collections::{HashMap, HashSet},
     fs,
     io::{BufRead, BufReader, Read},
     path::{Path, PathBuf},
     process::{Command, Output, Stdio},
-    sync::mpsc::Sender,
+    sync::mpsc::{self, Receiver, Sender},
     thread,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
 use url::Url;
 
+pub use crate::models::download::{DownloadPlan, MediaItem};
+
 const OUTPUT_MARKER: &str = "__R_VIDEO_FETCHER_OUTPUT__";
 const INSPECTION_TIMEOUT: Duration = Duration::from_secs(300);
+const MAX_CONCURRENT_PLAYLIST_ITEMS: usize = 4;
 
-#[derive(Clone, Debug)]
-pub struct MediaItem {
-    pub title: String,
-    pub url: String,
-    pub channel: String,
-    pub estimated_bytes: Option<u64>,
-}
-
-#[derive(Clone, Debug)]
-pub struct DownloadPlan {
-    pub source_url: String,
-    pub batch_name: String,
-    pub playlist_name: Option<String>,
-    pub items: Vec<MediaItem>,
-    pub estimated_bytes: u64,
-    pub unknown_size_count: usize,
-    pub free_bytes: u64,
+#[derive(Debug)]
+pub enum InspectionProgress {
+    CheckingTools,
+    FetchingMetadata,
+    EstimatingItems {
+        completed: usize,
+        total: usize,
+        active: usize,
+        unavailable: usize,
+    },
+    CheckingDiskSpace,
 }
 
 #[derive(Debug)]
 pub enum DownloadEvent {
     PlanReady(Result<DownloadPlan, String>),
+    InspectionProgress(InspectionProgress),
     AttemptStarted {
         index: usize,
         attempt: u8,
@@ -54,14 +54,28 @@ pub enum DownloadEvent {
         index: usize,
         size_bytes: u64,
     },
+    ItemVerifying {
+        index: usize,
+    },
+    ItemAborted {
+        index: usize,
+    },
     ItemFailed {
         index: usize,
         message: String,
     },
-    Finished(Result<HistoryRecord, String>),
+    Finished(Result<Project, String>),
 }
 
 pub fn inspect_batch(source_url: &str, settings: &Settings) -> Result<DownloadPlan> {
+    inspect_batch_with_progress(source_url, settings, |_| {})
+}
+
+pub fn inspect_batch_with_progress(
+    source_url: &str,
+    settings: &Settings,
+    mut report_progress: impl FnMut(InspectionProgress),
+) -> Result<DownloadPlan> {
     let parsed_url = Url::parse(source_url).context("Enter a valid HTTP or HTTPS URL.")?;
     if !matches!(parsed_url.scheme(), "http" | "https") || parsed_url.host_str().is_none() {
         bail!("Enter a valid HTTP or HTTPS URL.");
@@ -76,15 +90,18 @@ pub fn inspect_batch(source_url: &str, settings: &Settings) -> Result<DownloadPl
         );
     }
 
+    report_progress(InspectionProgress::CheckingTools);
     check_tool("yt-dlp", &["--version"])?;
     check_tool("ffmpeg", &["-version"])?;
 
+    report_progress(InspectionProgress::FetchingMetadata);
     let mut command = Command::new("yt-dlp");
     command
         .args([
             "--no-warnings",
             "--no-call-home",
             "--skip-download",
+            "--flat-playlist",
             "--dump-single-json",
             "--socket-timeout",
             "10",
@@ -94,7 +111,7 @@ pub fn inspect_batch(source_url: &str, settings: &Settings) -> Result<DownloadPl
             "1",
         ])
         .arg(source_url);
-    let output = output_with_timeout(&mut command, INSPECTION_TIMEOUT)
+    let output = output_with_timeout(&mut command, INSPECTION_TIMEOUT, |_| {})
         .context("Could not inspect the URL with yt-dlp.")?;
     if !output.status.success() {
         bail!(
@@ -104,7 +121,8 @@ pub fn inspect_batch(source_url: &str, settings: &Settings) -> Result<DownloadPl
     }
     let metadata: Value = serde_json::from_slice(&output.stdout)
         .context("yt-dlp returned invalid metadata for this URL.")?;
-    let (batch_name, playlist_name, items) = parse_metadata(&metadata, source_url)?;
+    let (batch_name, playlist_name, mut items) = parse_metadata(&metadata, source_url)?;
+    estimate_missing_item_sizes(&mut items, &mut report_progress)?;
     let estimated_bytes = items
         .iter()
         .filter_map(|item| item.estimated_bytes)
@@ -113,6 +131,7 @@ pub fn inspect_batch(source_url: &str, settings: &Settings) -> Result<DownloadPl
         .iter()
         .filter(|item| item.estimated_bytes.is_none())
         .count();
+    report_progress(InspectionProgress::CheckingDiskSpace);
     let free_bytes = disk_space_available(&settings.download_root)?;
 
     Ok(DownloadPlan {
@@ -124,6 +143,116 @@ pub fn inspect_batch(source_url: &str, settings: &Settings) -> Result<DownloadPl
         unknown_size_count,
         free_bytes,
     })
+}
+
+fn estimate_missing_item_sizes(
+    items: &mut [MediaItem],
+    report_progress: &mut impl FnMut(InspectionProgress),
+) -> Result<()> {
+    let pending_indices = items
+        .iter()
+        .enumerate()
+        .filter_map(|(index, item)| item.estimated_bytes.is_none().then_some(index))
+        .collect::<Vec<_>>();
+    if pending_indices.is_empty() {
+        return Ok(());
+    }
+
+    let total = items.len();
+    let mut completed = total - pending_indices.len();
+    let mut active = 0;
+    let mut unavailable = 0;
+    let mut next_pending = 0;
+    thread::scope(|scope| -> Result<()> {
+        let (completed_tx, completed_rx) = mpsc::channel();
+
+        while active < MAX_CONCURRENT_PLAYLIST_ITEMS && next_pending < pending_indices.len() {
+            spawn_size_estimate(
+                scope,
+                pending_indices[next_pending],
+                &items[pending_indices[next_pending]].url,
+                completed_tx.clone(),
+            );
+            active += 1;
+            next_pending += 1;
+        }
+        report_progress(InspectionProgress::EstimatingItems {
+            completed,
+            total,
+            active,
+            unavailable,
+        });
+
+        while active > 0 {
+            let (index, result) = completed_rx
+                .recv()
+                .context("Size-estimation workers stopped before the playlist was estimated.")?;
+            active -= 1;
+            completed += 1;
+            match result {
+                Ok(Some(size_bytes)) => items[index].estimated_bytes = Some(size_bytes),
+                Ok(None) | Err(_) => unavailable += 1,
+            }
+
+            while active < MAX_CONCURRENT_PLAYLIST_ITEMS && next_pending < pending_indices.len() {
+                let index = pending_indices[next_pending];
+                spawn_size_estimate(scope, index, &items[index].url, completed_tx.clone());
+                active += 1;
+                next_pending += 1;
+            }
+            report_progress(InspectionProgress::EstimatingItems {
+                completed,
+                total,
+                active,
+                unavailable,
+            });
+        }
+
+        Ok(())
+    })
+}
+
+fn spawn_size_estimate<'scope>(
+    scope: &'scope thread::Scope<'scope, '_>,
+    index: usize,
+    url: &str,
+    completed_tx: Sender<(usize, Result<Option<u64>>)>,
+) {
+    let url = url.to_owned();
+    scope.spawn(move || {
+        let result = estimate_item_size_from_url(&url);
+        let _ = completed_tx.send((index, result));
+    });
+}
+
+fn estimate_item_size_from_url(url: &str) -> Result<Option<u64>> {
+    let mut command = Command::new("yt-dlp");
+    command
+        .args([
+            "--no-warnings",
+            "--no-call-home",
+            "--skip-download",
+            "--no-playlist",
+            "--dump-single-json",
+            "--socket-timeout",
+            "10",
+            "--retries",
+            "1",
+            "--extractor-retries",
+            "1",
+        ])
+        .arg(url);
+    let output = output_with_timeout(&mut command, INSPECTION_TIMEOUT, |_| {})
+        .with_context(|| format!("Could not estimate size for {url}."))?;
+    if !output.status.success() {
+        bail!(
+            "yt-dlp could not estimate size for {url}: {}",
+            diagnostic_text(&output.stderr)
+        );
+    }
+    let metadata: Value = serde_json::from_slice(&output.stdout)
+        .with_context(|| format!("yt-dlp returned invalid size metadata for {url}."))?;
+    Ok(estimate_item_size(&metadata))
 }
 
 pub fn parse_metadata(
@@ -186,85 +315,240 @@ pub fn download_batch(
     plan: DownloadPlan,
     settings: Settings,
     events: Sender<DownloadEvent>,
-) -> Result<HistoryRecord> {
-    let total_attempts = settings.max_retries.saturating_add(1).max(1);
-    let mut log = vec![format!(
-        "Starting batch '{}' with {} video(s).",
-        plan.batch_name,
-        plan.items.len()
-    )];
-    let mut total_size = 0u64;
+) -> Result<Project> {
+    let (_abort_sender, abort_requests) = mpsc::channel();
+    download_batch_with_abort(plan, settings, events, abort_requests)
+}
 
-    for (index, item) in plan.items.iter().enumerate() {
-        let mut final_result = None;
-        for attempt in 1..=total_attempts {
-            let _ = events.send(DownloadEvent::AttemptStarted {
-                index,
-                attempt,
-                total_attempts,
-            });
-            match download_item(index, item, &plan, &settings, &events) {
-                Ok((path, size_bytes)) => {
-                    total_size = total_size.saturating_add(size_bytes);
-                    log.push(format!(
-                        "Downloaded '{}' ({} bytes) to {}.",
-                        item.title,
-                        size_bytes,
-                        path.display()
-                    ));
-                    let _ = events.send(DownloadEvent::ItemCompleted { index, size_bytes });
-                    final_result = Some(Ok(()));
-                    break;
+pub fn download_batch_with_abort(
+    plan: DownloadPlan,
+    settings: Settings,
+    events: Sender<DownloadEvent>,
+    abort_requests: Receiver<usize>,
+) -> Result<Project> {
+    let total_attempts = settings.max_retries.saturating_add(1).max(1);
+    let concurrency_limit = download_concurrency_limit(&plan);
+    let item_results = thread::scope(|scope| -> Result<Vec<Option<ItemDownloadResult>>> {
+        let (completed_tx, completed_rx) = mpsc::channel();
+        let mut results = std::iter::repeat_with(|| None)
+            .take(plan.items.len())
+            .collect::<Vec<_>>();
+        let mut active: HashMap<usize, Sender<()>> = HashMap::new();
+        let mut pending_aborts = HashSet::new();
+        let mut next_index = 0;
+
+        loop {
+            for index in abort_requests.try_iter() {
+                if let Some(abort_tx) = active.get(&index) {
+                    let _ = abort_tx.send(());
+                } else if index >= next_index && index < plan.items.len() {
+                    pending_aborts.insert(index);
                 }
-                Err(error) => {
-                    let message = format!("{error:#}");
-                    log.push(format!(
-                        "Attempt {attempt}/{total_attempts} failed for '{}': {message}",
-                        item.title
-                    ));
-                    if attempt < total_attempts {
-                        let _ = events.send(DownloadEvent::ItemFailed {
-                            index,
-                            message: format!(
-                                "Attempt {attempt}/{total_attempts} failed; retrying: {message}"
-                            ),
-                        });
-                    }
-                    final_result = Some(Err(message));
+            }
+
+            while active.len() < concurrency_limit && next_index < plan.items.len() {
+                let index = next_index;
+                next_index += 1;
+                if pending_aborts.remove(&index) {
+                    let item = &plan.items[index];
+                    let _ = events.send(DownloadEvent::ItemAborted { index });
+                    results[index] = Some(ItemDownloadResult {
+                        outcome: ItemDownloadOutcome::Aborted,
+                        log_entries: vec![DownloadLogEntry::GenericMessage {
+                            message: format!("Aborted '{}'.", item.title),
+                        }],
+                    });
+                    continue;
+                }
+
+                let (abort_tx, abort_rx) = mpsc::channel();
+                active.insert(index, abort_tx);
+                let item = &plan.items[index];
+                let plan_ref = &plan;
+                let settings_ref = &settings;
+                let worker_events = events.clone();
+                let worker_completed_tx = completed_tx.clone();
+                scope.spawn(move || {
+                    let result = download_item_with_retries(
+                        index,
+                        item,
+                        plan_ref,
+                        settings_ref,
+                        &worker_events,
+                        abort_rx,
+                        total_attempts,
+                    );
+                    let _ = worker_completed_tx.send((index, result));
+                });
+            }
+
+            if active.is_empty() && next_index == plan.items.len() {
+                break;
+            }
+
+            match completed_rx.recv_timeout(Duration::from_millis(100)) {
+                Ok((index, result)) => {
+                    active.remove(&index);
+                    results[index] = Some(result);
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    bail!("Download workers stopped before the batch completed.")
                 }
             }
         }
-        if let Some(Err(message)) = final_result {
-            log.push(format!(
-                "Failed '{}' after {total_attempts} attempt(s): {message}",
-                item.title
-            ));
-            let _ = events.send(DownloadEvent::ItemFailed {
-                index,
-                message: format!("Failed after {total_attempts} attempt(s): {message}"),
-            });
+
+        Ok(results)
+    })?;
+
+    let mut log = vec![DownloadLogEntry::GenericMessage {
+        message: format!(
+            "Starting batch '{}' with {} video(s).",
+            plan.batch_name,
+            plan.items.len()
+        ),
+    }];
+    let mut total_size = 0u64;
+    for (index, result) in item_results.into_iter().enumerate() {
+        let result = result.ok_or_else(|| {
+            anyhow!(
+                "Download worker for '{}' did not return a result.",
+                plan.items[index].title
+            )
+        })?;
+        log.extend(result.log_entries);
+        if let ItemDownloadOutcome::Completed(size_bytes) = result.outcome {
+            total_size = total_size.saturating_add(size_bytes);
         }
     }
 
-    let created_at_unix_seconds = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .context("System clock is earlier than the Unix epoch.")?
-        .as_secs();
-    let record = HistoryRecord {
-        batch_name: plan.batch_name,
-        url: plan.source_url,
-        created_at_unix_seconds,
-        size_bytes: total_size,
-        download_log: log,
-        target_folder: settings.download_root,
-        media_type: Some(if plan.playlist_name.is_some() {
+    let channel = plan
+        .items
+        .first()
+        .map(|item| sanitize_path_component(&item.channel));
+    let playlist = plan.playlist_name.as_deref().map(sanitize_path_component);
+    let record = Project::completed_download(
+        plan.batch_name,
+        plan.source_url,
+        total_size,
+        log,
+        settings.download_root,
+        channel,
+        playlist,
+        if plan.playlist_name.is_some() {
             MediaType::Playlist
         } else {
             MediaType::SingleVideo
-        }),
-    };
+        },
+    )?;
     storage::save_history(&record)?;
     Ok(record)
+}
+
+pub fn download_concurrency_limit(plan: &DownloadPlan) -> usize {
+    if plan.playlist_name.is_some() {
+        MAX_CONCURRENT_PLAYLIST_ITEMS
+    } else {
+        1
+    }
+}
+
+struct ItemDownloadResult {
+    outcome: ItemDownloadOutcome,
+    log_entries: Vec<DownloadLogEntry>,
+}
+
+enum ItemDownloadOutcome {
+    Completed(u64),
+    Aborted,
+    Failed,
+}
+
+fn download_item_with_retries(
+    index: usize,
+    item: &MediaItem,
+    plan: &DownloadPlan,
+    settings: &Settings,
+    events: &Sender<DownloadEvent>,
+    abort_requests: Receiver<()>,
+    total_attempts: u8,
+) -> ItemDownloadResult {
+    let mut log_entries = Vec::new();
+
+    for attempt in 1..=total_attempts {
+        if abort_requests.try_recv().is_ok() {
+            log_entries.push(DownloadLogEntry::GenericMessage {
+                message: format!("Aborted '{}'.", item.title),
+            });
+            let _ = events.send(DownloadEvent::ItemAborted { index });
+            return ItemDownloadResult {
+                outcome: ItemDownloadOutcome::Aborted,
+                log_entries,
+            };
+        }
+        let _ = events.send(DownloadEvent::AttemptStarted {
+            index,
+            attempt,
+            total_attempts,
+        });
+
+        match download_item(index, item, plan, settings, events, &abort_requests) {
+            Ok(Some((_, size_bytes))) => {
+                log_entries.push(DownloadLogEntry::DownloadMessage {
+                    message: format!("Downloaded '{}' ({} bytes).", item.title, size_bytes),
+                });
+                let _ = events.send(DownloadEvent::ItemCompleted { index, size_bytes });
+                return ItemDownloadResult {
+                    outcome: ItemDownloadOutcome::Completed(size_bytes),
+                    log_entries,
+                };
+            }
+            Ok(None) => {
+                log_entries.push(DownloadLogEntry::GenericMessage {
+                    message: format!("Aborted '{}'.", item.title),
+                });
+                let _ = events.send(DownloadEvent::ItemAborted { index });
+                return ItemDownloadResult {
+                    outcome: ItemDownloadOutcome::Aborted,
+                    log_entries,
+                };
+            }
+            Err(error) => {
+                let message = format!("{error:#}");
+                log_entries.push(DownloadLogEntry::GenericMessage {
+                    message: format!(
+                        "Attempt {attempt}/{total_attempts} failed for '{}': {message}",
+                        item.title
+                    ),
+                });
+                if attempt < total_attempts {
+                    let _ = events.send(DownloadEvent::ItemFailed {
+                        index,
+                        message: format!(
+                            "Attempt {attempt}/{total_attempts} failed; retrying: {message}"
+                        ),
+                    });
+                } else {
+                    log_entries.push(DownloadLogEntry::GenericMessage {
+                        message: format!(
+                            "Failed '{}' after {total_attempts} attempt(s): {message}",
+                            item.title
+                        ),
+                    });
+                    let _ = events.send(DownloadEvent::ItemFailed {
+                        index,
+                        message: format!("Failed after {total_attempts} attempt(s): {message}"),
+                    });
+                    return ItemDownloadResult {
+                        outcome: ItemDownloadOutcome::Failed,
+                        log_entries,
+                    };
+                }
+            }
+        }
+    }
+
+    unreachable!("download attempts are configured to run at least once")
 }
 
 pub fn format_selector(settings: &Settings) -> String {
@@ -285,6 +569,13 @@ pub fn format_selector(settings: &Settings) -> String {
         format!("bestvideo+bestaudio{audio_filters}/best")
     } else {
         format!("bestvideo{height_filter}+bestaudio{audio_filters}/best{height_filter}/best")
+    }
+}
+
+pub fn file_type_args(settings: &Settings) -> &'static [&'static str] {
+    match settings.file_type {
+        FileType::FromSourceVideo => &[],
+        FileType::Mp4 => &["--recode-video", "mp4"],
     }
 }
 
@@ -344,7 +635,8 @@ fn download_item(
     plan: &DownloadPlan,
     settings: &Settings,
     events: &Sender<DownloadEvent>,
-) -> Result<(PathBuf, u64)> {
+    abort_requests: &Receiver<()>,
+) -> Result<Option<(PathBuf, u64)>> {
     let output_directory =
         download_output_directory(&settings.download_root, item, plan.playlist_name.as_deref());
     fs::create_dir_all(&output_directory).with_context(|| {
@@ -366,10 +658,11 @@ fn download_item(
             "--format",
         ])
         .arg(format_selector(settings))
+        .args(file_type_args(settings))
         .arg("--output")
         .arg(output_template)
         .arg("--print")
-        .arg(format!("after_move:{OUTPUT_MARKER}%(filepath)s"))
+        .arg(format!("after_move:{OUTPUT_MARKER}%(id)s|%(ext)s"))
         .arg(&item.url)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -403,48 +696,68 @@ fn download_item(
         Ok::<_, std::io::Error>(diagnostics)
     });
 
-    let mut output_path = None;
-    let mut read_error = None;
-    let mut line = Vec::new();
-    let mut stdout_reader = BufReader::new(stdout);
-    loop {
-        line.clear();
-        match stdout_reader.read_until(b'\n', &mut line) {
-            Ok(0) => break,
-            Ok(_) => {
-                let line_text = String::from_utf8_lossy(&line);
-                if let Some(path) = line_text.trim().strip_prefix(OUTPUT_MARKER) {
-                    output_path = Some(PathBuf::from(path));
-                } else if let Some(percent) = parse_progress_percent(&line_text) {
-                    let _ = events.send(DownloadEvent::Progress { index, percent });
-                }
-            }
-            Err(error) => {
-                read_error = Some(error);
+    let stdout_events = events.clone();
+    let stdout_reader = thread::spawn(move || {
+        let mut output = Vec::new();
+        let mut line = Vec::new();
+        let mut reader = BufReader::new(stdout);
+        loop {
+            line.clear();
+            let bytes_read = reader.read_until(b'\n', &mut line)?;
+            if bytes_read == 0 {
                 break;
             }
+            if let Some(percent) = parse_progress_percent(&String::from_utf8_lossy(&line)) {
+                let _ = stdout_events.send(DownloadEvent::Progress { index, percent });
+            }
+            output.extend_from_slice(&line);
         }
-    }
-    let status = child
-        .wait()
-        .context("Could not wait for yt-dlp to finish.")?;
+        Ok::<_, std::io::Error>(output)
+    });
+
+    let (status, aborted) = loop {
+        if let Some(status) = child.try_wait().context("Could not check yt-dlp status.")? {
+            break (status, false);
+        }
+        if abort_requests.try_recv().is_ok() {
+            child
+                .kill()
+                .context("Could not stop yt-dlp after an abort request.")?;
+            let status = child
+                .wait()
+                .context("Could not wait for aborted yt-dlp process.")?;
+            break (status, true);
+        }
+        thread::sleep(Duration::from_millis(100));
+    };
+    let stdout = stdout_reader
+        .join()
+        .map_err(|_| anyhow!("Could not collect yt-dlp progress output."))?
+        .context("Could not read yt-dlp progress output.")?;
     let stderr = stderr_reader
         .join()
         .map_err(|_| anyhow!("Could not collect yt-dlp diagnostics."))?
         .context("Could not read yt-dlp diagnostics.")?;
-    if let Some(error) = read_error {
-        return Err(error).context("Could not read yt-dlp progress.");
+    if aborted {
+        return Ok(None);
     }
     if !status.success() {
         bail!("yt-dlp failed: {}", diagnostic_text(&stderr));
     }
 
-    let output_path = output_path.ok_or_else(|| {
-        anyhow!(
-            "yt-dlp completed without reporting the output file for '{}'.",
-            item.title
-        )
-    })?;
+    let _ = events.send(DownloadEvent::ItemVerifying { index });
+    let output = String::from_utf8_lossy(&stdout);
+    let (video_id, extension) = output
+        .lines()
+        .find_map(|line| line.trim().strip_prefix(OUTPUT_MARKER))
+        .and_then(|details| details.split_once('|'))
+        .ok_or_else(|| {
+            anyhow!(
+                "yt-dlp completed without reporting the video ID and extension for '{}'.",
+                item.title
+            )
+        })?;
+    let output_path = find_downloaded_file(&output_directory, video_id, extension)?;
     let metadata = fs::metadata(&output_path).with_context(|| {
         format!(
             "Downloaded file was not found at {}.",
@@ -455,7 +768,51 @@ fn download_item(
         bail!("Downloaded file is empty: {}", output_path.display());
     }
     verify_file(&output_path)?;
-    Ok((output_path, metadata.len()))
+    Ok(Some((output_path, metadata.len())))
+}
+
+pub fn find_downloaded_file(
+    output_directory: &Path,
+    video_id: &str,
+    extension: &str,
+) -> Result<PathBuf> {
+    let suffix = format!("[{video_id}].{extension}");
+    let mut matching_path = None;
+    for entry in fs::read_dir(output_directory).with_context(|| {
+        format!(
+            "Could not list download folder {}.",
+            output_directory.display()
+        )
+    })? {
+        let entry = entry.with_context(|| {
+            format!("Could not read an entry in {}.", output_directory.display())
+        })?;
+        if !entry
+            .file_type()
+            .with_context(|| format!("Could not inspect {}.", entry.path().display()))?
+            .is_file()
+        {
+            continue;
+        }
+        if !entry.file_name().to_string_lossy().ends_with(&suffix) {
+            continue;
+        }
+        if matching_path.replace(entry.path()).is_some() {
+            bail!(
+                "Multiple downloaded files matched video ID '{}' in {}.",
+                video_id,
+                output_directory.display()
+            );
+        }
+    }
+    matching_path.ok_or_else(|| {
+        anyhow!(
+            "Downloaded file with ID '{}' and extension '.{}' was not found in {}.",
+            video_id,
+            extension,
+            output_directory.display()
+        )
+    })
 }
 
 fn verify_file(path: &Path) -> Result<()> {
@@ -489,7 +846,11 @@ fn check_tool(program: &str, arguments: &[&str]) -> Result<()> {
     Ok(())
 }
 
-fn output_with_timeout(command: &mut Command, timeout: Duration) -> Result<Output> {
+fn output_with_timeout(
+    command: &mut Command,
+    timeout: Duration,
+    mut on_stderr_line: impl FnMut(&str),
+) -> Result<Output> {
     let mut child = command
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -509,14 +870,27 @@ fn output_with_timeout(command: &mut Command, timeout: Duration) -> Result<Outpu
             .read_to_end(&mut output)
             .map(|_| output)
     });
+    let (stderr_lines_tx, stderr_lines_rx) = mpsc::channel();
     let stderr_reader = thread::spawn(move || {
         let mut output = Vec::new();
-        BufReader::new(stderr)
-            .read_to_end(&mut output)
-            .map(|_| output)
+        let mut reader = BufReader::new(stderr);
+        let mut line = Vec::new();
+        loop {
+            line.clear();
+            let bytes_read = reader.read_until(b'\n', &mut line)?;
+            if bytes_read == 0 {
+                break;
+            }
+            output.extend_from_slice(&line);
+            let _ = stderr_lines_tx.send(line.clone());
+        }
+        Ok(output)
     });
     let started = Instant::now();
     let status = loop {
+        for line in stderr_lines_rx.try_iter() {
+            on_stderr_line(&String::from_utf8_lossy(&line));
+        }
         match child.try_wait().context("Could not check yt-dlp status.")? {
             Some(status) => break status,
             None if started.elapsed() >= timeout => {
@@ -536,10 +910,15 @@ fn output_with_timeout(command: &mut Command, timeout: Duration) -> Result<Outpu
             None => thread::sleep(Duration::from_millis(100)),
         }
     };
+    let stdout = join_command_reader(stdout_reader, "output")?;
+    let stderr = join_command_reader(stderr_reader, "diagnostics")?;
+    for line in stderr_lines_rx.try_iter() {
+        on_stderr_line(&String::from_utf8_lossy(&line));
+    }
     Ok(Output {
         status,
-        stdout: join_command_reader(stdout_reader, "output")?,
-        stderr: join_command_reader(stderr_reader, "diagnostics")?,
+        stdout,
+        stderr,
     })
 }
 

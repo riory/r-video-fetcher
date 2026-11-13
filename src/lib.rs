@@ -1,6 +1,9 @@
 pub mod app;
 pub mod dialogs;
 pub mod downloader;
+pub mod formatting;
 pub mod locales;
 pub mod model;
+pub mod models;
 pub mod storage;
+pub mod themes;
