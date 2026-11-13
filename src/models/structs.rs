@@ -3,6 +3,9 @@ use std::path::PathBuf;
 
 pub const DEFAULT_MAX_RETRIES: u8 = 3;
 pub const MAX_RETRIES: u8 = 10;
+pub const MIN_ZOOM_PERCENT: u16 = 50;
+pub const MAX_ZOOM_PERCENT: u16 = 200;
+pub const DEFAULT_ZOOM_PERCENT: u16 = 100;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(default)]
@@ -15,6 +18,7 @@ pub struct Settings {
     pub audio_sample_rate: AudioSampleRate,
     pub audio_channels: AudioChannels,
     pub language: Language,
+    pub zoom_percent: u16,
     pub recent_files: Vec<PathBuf>,
     pub window_state: Option<WindowState>,
 }
@@ -30,6 +34,7 @@ impl Default for Settings {
             audio_sample_rate: AudioSampleRate::FromSourceVideo,
             audio_channels: AudioChannels::FromSourceVideo,
             language: Language::English,
+            zoom_percent: DEFAULT_ZOOM_PERCENT,
             recent_files: Vec::new(),
             window_state: None,
         }
@@ -96,6 +101,12 @@ impl From<&Settings> for MediaOverrides {
 }
 
 impl Settings {
+    pub fn restore_preferences(&self, mut defaults: Self) -> Self {
+        defaults.recent_files.clone_from(&self.recent_files);
+        defaults.window_state = self.window_state;
+        defaults
+    }
+
     pub fn apply_media_overrides(&mut self, overrides: MediaOverrides) {
         self.video_resolution = overrides.video_resolution;
         self.audio_sample_rate = overrides.audio_sample_rate;

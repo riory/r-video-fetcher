@@ -39,11 +39,11 @@ After the GitHub Release is available, submit its installer URL to the [Windows 
 
 Install the recommended Rust Analyzer and LLDB-DAP extensions. To run the app without a debugger, use **Terminal → Run Task → Run r-video-fetcher**; this runs `cargo run` and does not require LLDB-DAP. **F5** (or **Ctrl+F5**) uses the LLDB-DAP launch configuration and requires `lldb-dap.exe` at the configured path.
 
-The app's **File** menu supports New/Open/Save/Exit for `.dwnl` project files, with recent projects and Ctrl+N/Ctrl+O/Ctrl+S shortcuts; Exit also works with Alt+F4 and saves the current URL. The **Download** menu supports clipboard downloads and a modal history with URL reuse and confirmed clearing. Preferences are grouped into Download and User interface; the UI supports English and Russian, with Default, Dark, and Zenburn themes. Preference changes save automatically; the Init tab lists the dependency commands.
+The app's **File** menu supports New/Open/Save/Settings/Exit for `.dwnl` project files, with recent projects and Ctrl+N/Ctrl+O/Ctrl+S shortcuts; Exit also works with Alt+F4 and saves the current URL. The **Download** menu supports clipboard downloads and a modal history with URL reuse and confirmed clearing. In-app dialogs open centered in the main window; native file and folder dialogs are owned and positioned by Windows. Preferences are grouped into Download and User interface; the UI supports English and Russian, Default, Dark, and Zenburn themes, and 50%–200% zoom. Changes save automatically. Restore defaults requires confirmation and leaves recent files, window state, history, and the current project unchanged. The Init tab lists the dependency commands.
 
 The main window's position and size are saved on exit and restored on startup, clamped to the current monitor.
 
-Enter an HTTP(S) video or playlist URL, review the size and free-space estimate, then confirm the download. Files are organized under the configured root folder as:
+Enter an HTTP(S) video or playlist URL and press Enter or select Estimate and preview. Review the size and free-space estimate, then confirm the download. Files are organized under the configured root folder as:
 
 ```text
 <root>/<channel>/<playlist if applicable>/<title> [<id>].<extension>

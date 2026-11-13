@@ -50,6 +50,9 @@ Settings:
 - User interface
     - UI language (English or Russian)
     - Theme (default/dark/Zenburn)
+    - Zoom factor
+- Buttons
+    - Restore defaults (behind confirmation dialog)
 
 Coding guidelines:
 - use structured approach, ensure adhering to DRY and SOLID 
@@ -78,6 +81,14 @@ UI:
             - --separator--
             - Recent (list of recently opened files)
             - --separator--
+            - Settings (Ctrl-,)
+            - on click opens modal window with Settings
+                - tab 1: Preferences (lists global preferences)
+                    - group download preferences separately from UI preferences
+                    - Changing any value should trigger automatic save
+                    - No confirm button
+                - tab 2: Init (lists commands to initiate ps1 script that calls winget to install necessary dependencies (e.g. yt-dlp))
+                    - Only list commands as text, single multi-line block
             - Exit (Alt-F4)
                 - Save current project if url is not empty
                 - Terminate app
@@ -98,16 +109,7 @@ UI:
                 - opens new modal window with download history
             - Clear history
                 - should show confirmation dialog
-                    - if confirmed, clear all recent downloads
-        - Settings
-            - on click opens modal window with Settings
-                - tab 1: Preferences (lists global preferences)
-                    - group download preferences separately from UI preferences
-                    - Changing any value should trigger automatic save
-                    - No confirm button
-                - tab 2: Init (lists commands to initiate ps1 script that calls winget to install necessary dependencies (e.g. yt-dlp))
-                    - Only list commands as text, single multi-line block
-
+                    - if confirmed, clear all recent downloads        
 - work space:
     - list current url
     - list type (playlist/single video)                

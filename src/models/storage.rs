@@ -1,6 +1,6 @@
 use crate::{
     models::project::HistoryRecord,
-    models::structs::{MAX_RETRIES, Settings},
+    models::structs::{MAX_RETRIES, MAX_ZOOM_PERCENT, MIN_ZOOM_PERCENT, Settings},
 };
 use anyhow::{Context, Result, anyhow};
 use std::{
@@ -39,6 +39,16 @@ pub fn load_settings() -> Result<Settings> {
                     "The maximum retry count in {} must not exceed {}.",
                     path.display(),
                     MAX_RETRIES
+                ));
+            }
+            if !(MIN_ZOOM_PERCENT..=MAX_ZOOM_PERCENT).contains(&settings.zoom_percent)
+                || settings.zoom_percent % 10 != 0
+            {
+                return Err(anyhow!(
+                    "The zoom percentage in {} must be between {} and {} in steps of 10.",
+                    path.display(),
+                    MIN_ZOOM_PERCENT,
+                    MAX_ZOOM_PERCENT
                 ));
             }
             Ok(settings)

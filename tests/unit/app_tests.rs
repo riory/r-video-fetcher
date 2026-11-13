@@ -1,5 +1,5 @@
 use r_video_fetcher::{
-    app::{parse_clipboard_url, suggested_project_file_name},
+    app::{VideoFetcherApp, parse_clipboard_url, suggested_project_file_name},
     models::structs::{
         AppTheme, AudioChannels, AudioSampleRate, FileType, MediaOverrides, Settings,
         VideoResolution, WindowState,
@@ -10,6 +10,55 @@ use r_video_fetcher::{
     },
     themes,
 };
+
+#[test]
+fn enter_previews_only_when_url_editor_is_focused() {
+    use eframe::egui::{self, Event, Key, Modifiers, Pos2, RawInput, Rect};
+    use r_video_fetcher::models::{
+        locales::{Label, LocaleStrings},
+        structs::Language,
+    };
+
+    let context = egui::Context::default();
+    let locales = LocaleStrings::load().unwrap();
+    let mut app = VideoFetcherApp::new(LocaleStrings::load().unwrap());
+    let mut app_frame = eframe::Frame::_new_kittest();
+    let mut run = |events| {
+        context.run(
+            RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(1024.0, 900.0))),
+                events,
+                ..Default::default()
+            },
+            |ctx| eframe::App::update(&mut app, ctx, &mut app_frame),
+        )
+    };
+    let enter = |pressed| Event::Key {
+        key: Key::Enter,
+        physical_key: None,
+        pressed,
+        repeat: false,
+        modifiers: Modifiers::NONE,
+    };
+    let has_url_error = |output: &egui::FullOutput| {
+        output.shapes.iter().any(|shape| match &shape.shape {
+            egui::Shape::Text(text) => [Language::English, Language::Russian]
+                .iter()
+                .any(|language| text.galley.job.text == locales.text(*language, Label::EnterUrl)),
+            _ => false,
+        })
+    };
+
+    let _ = run(vec![]);
+    let _ = run(vec![enter(true)]);
+    let output = run(vec![enter(false)]);
+    assert!(!has_url_error(&output));
+
+    context.memory_mut(|memory| memory.request_focus(egui::Id::new("source_url")));
+    let _ = run(vec![enter(true)]);
+    let output = run(vec![enter(false)]);
+    assert!(has_url_error(&output));
+}
 
 #[test]
 fn weights_batch_progress_by_file_size_and_average_unknown_sizes() {

@@ -5,8 +5,8 @@ use crate::{
         settings::SettingsDialog,
     },
     models::structs::{
-        AppTheme, AudioChannels, AudioSampleRate, MediaOverrides, Settings, VideoResolution,
-        WindowState,
+        AppTheme, AudioChannels, AudioSampleRate, MAX_ZOOM_PERCENT, MIN_ZOOM_PERCENT,
+        MediaOverrides, Settings, VideoResolution, WindowState,
     },
     models::{
         download_engine::{self, DownloadEvent, InspectionProgress},
@@ -31,6 +31,7 @@ pub struct VideoFetcherApp {
     locales: LocaleStrings,
     settings: Settings,
     applied_theme: Option<AppTheme>,
+    applied_zoom: Option<u16>,
     pending_window_state: Option<WindowState>,
     default_folder_text: String,
     project_state: ProjectState,
@@ -89,6 +90,7 @@ impl VideoFetcherApp {
             locales,
             settings,
             applied_theme: None,
+            applied_zoom: None,
             pending_window_state,
             default_folder_text,
             project_state,
@@ -119,6 +121,29 @@ impl VideoFetcherApp {
             context.set_visuals(themes::visuals(self.settings.theme));
             self.applied_theme = Some(self.settings.theme);
             context.request_repaint();
+        }
+    }
+
+    fn sync_keyboard_zoom(&mut self, context: &egui::Context) {
+        if let Some(applied) = self.applied_zoom {
+            let actual = context.zoom_factor();
+            if (actual - f32::from(applied) / 100.0).abs() > 0.001 {
+                let zoom =
+                    ((actual * 10.0).round() as u16 * 10).clamp(MIN_ZOOM_PERCENT, MAX_ZOOM_PERCENT);
+                if self.settings.zoom_percent != zoom {
+                    self.settings.zoom_percent = zoom;
+                    self.save_settings();
+                }
+                context.set_zoom_factor(f32::from(zoom) / 100.0);
+                self.applied_zoom = Some(zoom);
+            }
+        }
+    }
+
+    fn apply_zoom(&mut self, context: &egui::Context) {
+        if self.applied_zoom != Some(self.settings.zoom_percent) {
+            context.set_zoom_factor(f32::from(self.settings.zoom_percent) / 100.0);
+            self.applied_zoom = Some(self.settings.zoom_percent);
         }
     }
 
@@ -282,9 +307,9 @@ impl VideoFetcherApp {
         self.status.clear();
     }
 
-    fn open_project_dialog(&mut self) {
+    fn open_project_dialog(&mut self, frame: &eframe::Frame) {
         self.new_project();
-        if let Some(path) = open_project_dialog::open_project() {
+        if let Some(path) = open_project_dialog::open_project_with_parent(frame) {
             self.open_project(&path);
         }
     }
@@ -313,7 +338,7 @@ impl VideoFetcherApp {
         }
     }
 
-    fn save_project_dialog(&mut self) {
+    fn save_project_dialog(&mut self, frame: &eframe::Frame) {
         let suggested_name = self
             .project_state
             .suggested_file_name()
@@ -326,7 +351,7 @@ impl VideoFetcherApp {
                 };
                 suggested_project_file_name("Unknown", batch_name)
             });
-        if let Some(path) = save_project_dialog::save_project(&suggested_name) {
+        if let Some(path) = save_project_dialog::save_project_with_parent(&suggested_name, frame) {
             match self.save_project_to(&path) {
                 Ok(()) => {
                     self.status = self
@@ -338,7 +363,7 @@ impl VideoFetcherApp {
         }
     }
 
-    fn save_project(&mut self) {
+    fn save_project(&mut self, frame: &eframe::Frame) {
         if let Some(path) = self.project_state.path().map(PathBuf::from) {
             match self.save_project_to(&path) {
                 Ok(()) => {
@@ -349,7 +374,7 @@ impl VideoFetcherApp {
                 Err(error) => self.error = Some(format!("{error:#}")),
             }
         } else {
-            self.save_project_dialog();
+            self.save_project_dialog(frame);
         }
     }
 
@@ -591,18 +616,39 @@ impl VideoFetcherApp {
         }
     }
 
-    fn show_settings_dialog(&mut self, context: &egui::Context) {
+    fn show_settings_dialog(&mut self, context: &egui::Context, frame: &eframe::Frame) {
         let previous_settings = self.settings.clone();
         let previous_default_folder = self.default_folder_text.clone();
-        self.settings_dialog.show(
+        let restore_defaults = self.settings_dialog.show_with_parent(
             context,
             &mut self.settings,
             &mut self.default_folder_text,
             &self.locales,
+            frame,
         );
-        if self.settings != previous_settings || self.default_folder_text != previous_default_folder
+        if restore_defaults {
+            self.restore_defaults();
+        } else if self.settings != previous_settings
+            || self.default_folder_text != previous_default_folder
         {
             self.save_settings();
+        }
+    }
+
+    fn restore_defaults(&mut self) {
+        let result = storage::default_settings().and_then(|defaults| {
+            let defaults = self.settings.restore_preferences(defaults);
+            storage::save_settings(&defaults)?;
+            Ok(defaults)
+        });
+        match result {
+            Ok(defaults) => {
+                self.default_folder_text = defaults.download_root.to_string_lossy().into_owned();
+                self.settings = defaults;
+                self.error = None;
+                self.status.clear();
+            }
+            Err(error) => self.error = Some(format!("{error:#}")),
         }
     }
 
@@ -668,6 +714,11 @@ impl VideoFetcherApp {
                         }
                     });
                     ui.separator();
+                    if ui.button(format!("{settings_label}    Ctrl+,")).clicked() {
+                        action = Some(MenuAction::ShowSettings);
+                        ui.close();
+                    }
+                    ui.separator();
                     if ui.button(format!("{exit_label}    Alt+F4")).clicked() {
                         action = Some(MenuAction::Exit);
                         ui.close();
@@ -694,19 +745,21 @@ impl VideoFetcherApp {
                         ui.close();
                     }
                 });
-                if ui.button(settings_label).clicked() {
-                    action = Some(MenuAction::ShowSettings);
-                }
             });
         });
         action
     }
 
-    fn handle_menu_action(&mut self, action: MenuAction, context: &egui::Context) {
+    fn handle_menu_action(
+        &mut self,
+        action: MenuAction,
+        context: &egui::Context,
+        frame: &eframe::Frame,
+    ) {
         match action {
             MenuAction::New => self.new_project(),
-            MenuAction::Open => self.open_project_dialog(),
-            MenuAction::Save => self.save_project(),
+            MenuAction::Open => self.open_project_dialog(frame),
+            MenuAction::Save => self.save_project(frame),
             MenuAction::Exit => context.send_viewport_cmd(egui::ViewportCommand::Close),
             MenuAction::FromClipboard => self.download_from_clipboard(),
             MenuAction::OpenRecent(path) => self.open_project(&path),
@@ -1010,7 +1063,9 @@ impl VideoFetcherApp {
 }
 
 impl eframe::App for VideoFetcherApp {
-    fn update(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
+    fn update(&mut self, context: &egui::Context, frame: &mut eframe::Frame) {
+        self.sync_keyboard_zoom(context);
+        self.apply_zoom(context);
         self.restore_window_state(context);
         self.apply_theme(context);
         self.poll_events();
@@ -1031,7 +1086,8 @@ impl eframe::App for VideoFetcherApp {
                 let open = input.consume_key(egui::Modifiers::CTRL, egui::Key::O);
                 let save = input.consume_key(egui::Modifiers::CTRL, egui::Key::S);
                 let clipboard = input.consume_key(egui::Modifiers::CTRL, egui::Key::B);
-                (new, open, save, clipboard)
+                let settings = input.consume_key(egui::Modifiers::CTRL, egui::Key::Comma);
+                (new, open, save, clipboard, settings)
             });
             if shortcuts.0 {
                 menu_action = Some(MenuAction::New);
@@ -1041,10 +1097,12 @@ impl eframe::App for VideoFetcherApp {
                 menu_action = Some(MenuAction::Save);
             } else if shortcuts.3 {
                 menu_action = Some(MenuAction::FromClipboard);
+            } else if shortcuts.4 {
+                menu_action = Some(MenuAction::ShowSettings);
             }
         }
         if let Some(action) = menu_action {
-            self.handle_menu_action(action, context);
+            self.handle_menu_action(action, context, frame);
         }
 
         let target_folder = self
@@ -1061,13 +1119,18 @@ impl eframe::App for VideoFetcherApp {
             ui.group(|ui| {
                 ui.add_enabled_ui(editor_enabled, |ui| {
                     ui.label(self.text(Label::Url));
-                    if ui
-                        .text_edit_singleline(self.project_state.source_url_mut())
-                        .changed()
-                    {
+                    let url_text_edit =
+                        egui::TextEdit::singleline(self.project_state.source_url_mut())
+                            .id(egui::Id::new("source_url"))
+                            .desired_width(f32::INFINITY);
+                    let response = ui.add(url_text_edit);
+                    if response.changed() {
                         self.project_state.commit_source_url();
                         self.project_state.set_suggested_file_name(None);
                     }
+                    let submit = editor_enabled
+                        && response.lost_focus()
+                        && ui.input(|input| input.key_pressed(egui::Key::Enter));
                     ui.separator();
                     ui.label(format!(
                         "{}: {target_folder}",
@@ -1086,7 +1149,7 @@ impl eframe::App for VideoFetcherApp {
                     };
                     ui.label(format!("{}: {media_type}", self.text(Label::MediaType)));
                     ui.horizontal(|ui| {
-                        if ui.button(self.text(Label::Preview)).clicked() {
+                        if ui.button(self.text(Label::Preview)).clicked() || submit {
                             self.start_inspection(false);
                         }
                         if self.download_session.is_inspecting() {
@@ -1108,7 +1171,8 @@ impl eframe::App for VideoFetcherApp {
                 self.error = Some(format!("{error:#}"));
             }
         }
-        self.show_settings_dialog(context);
+        self.show_settings_dialog(context, frame);
+        self.apply_zoom(context);
         self.apply_theme(context);
         self.show_history_dialog(context);
         if context.input(|input| input.viewport().close_requested()) {

@@ -4,7 +4,8 @@ use r_video_fetcher::{
         clear_history_from, load_recent_history_from, remember_recent_file, write_json,
     },
     models::structs::{
-        AudioChannels, AudioSampleRate, Language, MediaOverrides, Settings, VideoResolution,
+        AppTheme, AudioChannels, AudioSampleRate, Language, MediaOverrides, Settings,
+        VideoResolution, WindowState,
     },
 };
 use std::{
@@ -140,38 +141,38 @@ fn settings_without_recent_projects_keep_compatibility() {
 
     assert!(settings.recent_files.is_empty());
     assert_eq!(settings.max_retries, 3);
+    assert_eq!(settings.zoom_percent, 100);
 }
 
 #[test]
-fn language_preference_is_saved_and_restored() {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let path = env::temp_dir().join(format!(
-        "r-video-fetcher-language-{}-{unique}.json",
-        std::process::id()
-    ));
-    let settings = Settings {
+fn restoring_preferences_preserves_recent_files_and_window_state() {
+    let old = Settings {
+        download_root: "custom".into(),
+        max_retries: 9,
+        theme: AppTheme::Zenburn,
         language: Language::Russian,
+        zoom_percent: 150,
+        recent_files: vec!["recent.dwnl".into()],
+        window_state: Some(WindowState {
+            x: 10.0,
+            y: 20.0,
+            width: 700.0,
+            height: 600.0,
+        }),
+        ..Settings::default()
+    };
+    let defaults = Settings {
+        download_root: "default-downloads".into(),
         ..Settings::default()
     };
 
-    write_json(&path, &settings).unwrap();
-    let saved = fs::read_to_string(&path).unwrap();
-    assert_eq!(
-        serde_json::from_str::<serde_json::Value>(&saved).unwrap()["language"],
-        "russian"
-    );
-    assert_eq!(
-        serde_json::from_str::<Settings>(&saved).unwrap().language,
-        Language::Russian
-    );
-    assert_eq!(
-        serde_json::from_str::<Settings>(r#"{"language":"english"}"#)
-            .unwrap()
-            .language,
-        Language::English
-    );
-    fs::remove_file(path).unwrap();
+    let restored = old.restore_preferences(defaults.clone());
+    assert_eq!(restored.download_root, defaults.download_root);
+    assert_eq!(restored.max_retries, defaults.max_retries);
+    assert_eq!(restored.theme, defaults.theme);
+    assert_eq!(restored.language, defaults.language);
+    assert_eq!(restored.zoom_percent, defaults.zoom_percent);
+    assert_eq!(restored.recent_files, old.recent_files);
+    assert_eq!(restored.window_state, old.window_state);
 }
+

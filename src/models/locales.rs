@@ -47,6 +47,9 @@ pub enum Label {
     Language,
     DownloadSettings,
     UiSettings,
+    ZoomFactor,
+    RestoreDefaults,
+    RestoreDefaultsPrompt,
     Preview,
     CancelPreview,
     Abort,
@@ -97,7 +100,7 @@ pub enum Label {
 }
 
 impl Label {
-    const ALL: [Self; 89] = [
+    const ALL: [Self; 92] = [
         Self::File,
         Self::New,
         Self::Open,
@@ -140,6 +143,9 @@ impl Label {
         Self::Language,
         Self::DownloadSettings,
         Self::UiSettings,
+        Self::ZoomFactor,
+        Self::RestoreDefaults,
+        Self::RestoreDefaultsPrompt,
         Self::Preview,
         Self::CancelPreview,
         Self::Abort,
@@ -233,6 +239,9 @@ impl Label {
             Self::Language => "ui_language",
             Self::DownloadSettings => "download_settings",
             Self::UiSettings => "ui_settings",
+            Self::ZoomFactor => "zoom_factor",
+            Self::RestoreDefaults => "restore_defaults",
+            Self::RestoreDefaultsPrompt => "restore_defaults_prompt",
             Self::Preview => "preview",
             Self::CancelPreview => "cancel_preview",
             Self::Abort => "abort",

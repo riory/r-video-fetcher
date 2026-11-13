@@ -17,7 +17,9 @@ pub enum HistoryDialogAction {
 pub struct HistoryDialog {
     history: Vec<HistoryRecord>,
     open: bool,
+    center_on_open: bool,
     clear_confirmation_open: bool,
+    center_confirmation_on_open: bool,
 }
 
 impl HistoryDialog {
@@ -25,15 +27,23 @@ impl HistoryDialog {
         Self {
             history,
             open: false,
+            center_on_open: false,
             clear_confirmation_open: false,
+            center_confirmation_on_open: false,
         }
     }
 
     pub fn open(&mut self) {
+        if !self.open {
+            self.center_on_open = true;
+        }
         self.open = true;
     }
 
     pub fn confirm_clear(&mut self) {
+        if !self.clear_confirmation_open {
+            self.center_confirmation_on_open = true;
+        }
         self.clear_confirmation_open = true;
     }
 
@@ -77,72 +87,69 @@ impl HistoryDialog {
         let mut open = self.open;
         let mut open_target_folder = None;
         let min_window_size = 200.0 / context.pixels_per_point();
-        egui::Window::new(title)
+        let window = egui::Window::new(title)
             .id(egui::Id::new("download_history_window"))
             .open(&mut open)
-            .default_size([520.0, min_window_size])
             .min_size([min_window_size, min_window_size])
-            .resizable([true, true])
-            .collapsible(false)
-            .show(context, |ui| {
-                ui.set_min_size(egui::vec2(min_window_size, min_window_size));
-                if self.history.is_empty() {
-                    ui.label(no_history);
-                } else {
-                    egui::ScrollArea::vertical()
-                        .max_height(420.0)
-                        .show(ui, |ui| {
-                            for (index, record) in self.history.iter().enumerate() {
-                                egui::CollapsingHeader::new(format!(
-                                    "{}. {} - {}",
-                                    index + 1,
-                                    record.batch_name,
-                                    format_bytes(record.size_bytes)
-                                ))
-                                .id_salt(("history", index))
-                                .show(ui, |ui| {
-                                    ui.label(&record.url);
-                                    ui.horizontal(|ui| {
-                                        if ui
-                                            .add_enabled(!busy, egui::Button::new(&reuse_label))
-                                            .clicked()
-                                        {
-                                            selected_record = Some(record.clone());
-                                        }
-                                        if let Some(folder) = record.download_folder() {
-                                            let folder_label = folder.display().to_string();
-                                            let link = ui
-                                                .add(
-                                                    egui::Label::new(
-                                                        egui::RichText::new(folder_label)
-                                                            .underline()
-                                                            .color(ui.visuals().hyperlink_color),
-                                                    )
-                                                    .sense(egui::Sense::click()),
+            .resizable(true)
+            .collapsible(false);
+        super::center_on_open(window, context, &mut self.center_on_open).show(context, |ui| {
+            ui.set_min_size(egui::vec2(min_window_size, min_window_size));
+            if self.history.is_empty() {
+                ui.label(no_history);
+            } else {
+                egui::ScrollArea::both()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        for (index, record) in self.history.iter().enumerate() {
+                            egui::CollapsingHeader::new(format!(
+                                "{}. {} - {}",
+                                index + 1,
+                                record.batch_name,
+                                format_bytes(record.size_bytes)
+                            ))
+                            .id_salt(("history", index))
+                            .show(ui, |ui| {
+                                ui.label(&record.url);
+                                ui.horizontal(|ui| {
+                                    if ui
+                                        .add_enabled(!busy, egui::Button::new(&reuse_label))
+                                        .clicked()
+                                    {
+                                        selected_record = Some(record.clone());
+                                    }
+                                    if let Some(folder) = record.download_folder() {
+                                        let folder_label = folder.display().to_string();
+                                        let link = ui
+                                            .add(
+                                                egui::Label::new(
+                                                    egui::RichText::new(folder_label)
+                                                        .underline()
+                                                        .color(ui.visuals().hyperlink_color),
                                                 )
-                                                .on_hover_cursor(egui::CursorIcon::PointingHand);
-                                            if link.clicked() {
-                                                open_target_folder = Some(folder);
-                                            }
-                                        }
-                                    });
-                                    for entry in &record.download_log {
-                                        match entry {
-                                            DownloadLogEntry::GenericMessage { message } => {
-                                                ui.label(message);
-                                            }
-                                            DownloadLogEntry::DownloadMessage { message } => {
-                                                ui.label(
-                                                    format_download_log_message(message).as_ref(),
-                                                );
-                                            }
+                                                .sense(egui::Sense::click()),
+                                            )
+                                            .on_hover_cursor(egui::CursorIcon::PointingHand);
+                                        if link.clicked() {
+                                            open_target_folder = Some(folder);
                                         }
                                     }
                                 });
-                            }
-                        });
-                }
-            });
+                                for entry in &record.download_log {
+                                    match entry {
+                                        DownloadLogEntry::GenericMessage { message } => {
+                                            ui.label(message);
+                                        }
+                                        DownloadLogEntry::DownloadMessage { message } => {
+                                            ui.label(format_download_log_message(message).as_ref());
+                                        }
+                                    }
+                                }
+                            });
+                        }
+                    });
+            }
+        });
         if let Some(folder) = open_target_folder {
             storage::open_folder(Path::new(&folder))?;
         }
@@ -171,19 +178,27 @@ impl HistoryDialog {
         let mut open = self.clear_confirmation_open;
         let mut confirm = false;
         let mut cancel = false;
-        egui::Window::new(title)
+        let window = egui::Window::new(title)
             .id(egui::Id::new("clear_history_confirmation_window"))
             .open(&mut open)
             .default_width(320.0)
             .resizable(false)
-            .collapsible(false)
-            .show(context, |ui| {
-                ui.label(prompt);
-                ui.horizontal(|ui| {
-                    confirm = ui.button(&clear_label).clicked();
-                    cancel = ui.button(&cancel_label).clicked();
-                });
-            });
+            .collapsible(false);
+        super::center_on_open(window, context, &mut self.center_confirmation_on_open).show(
+            context,
+            |ui| {
+                egui::Frame::NONE
+                    .inner_margin(egui::Margin::same(8))
+                    .show(ui, |ui| {
+                        ui.label(prompt);
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            confirm = ui.button(&clear_label).clicked();
+                            cancel = ui.button(&cancel_label).clicked();
+                        });
+                    });
+            },
+        );
         if confirm {
             self.close();
             storage::clear_history()?;
