@@ -175,4 +175,3 @@ fn restoring_preferences_preserves_recent_files_and_window_state() {
     assert_eq!(restored.recent_files, old.recent_files);
     assert_eq!(restored.window_state, old.window_state);
 }
-

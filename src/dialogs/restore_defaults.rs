@@ -43,7 +43,7 @@ impl RestoreDefaultsDialog {
             .collapsible(false);
         super::center_on_open(window, context, &mut self.center_on_open).show(context, |ui| {
             egui::Frame::NONE
-                .inner_margin(egui::Margin::same(8)) 
+                .inner_margin(egui::Margin::same(8))
                 .show(ui, |ui| {
                     ui.label(locales.text(language, Label::RestoreDefaultsPrompt));
                     ui.add_space(8.0);

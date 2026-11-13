@@ -116,7 +116,6 @@ impl SettingsDialog {
                     }
                 }
             });
-                
             });
         self.open = open;
         if !self.open {
@@ -126,7 +125,8 @@ impl SettingsDialog {
         if restore_requested {
             self.restore_defaults.open();
         }
-        self.restore_defaults.show(context, locales, settings.language)
+        self.restore_defaults
+            .show(context, locales, settings.language)
     }
 }
 
@@ -226,7 +226,12 @@ fn show_preferences(
                 });
                 ui.end_row();
 
-                settings_label(ui, text(locales, language, Label::Retries), label_width, stacked);
+                settings_label(
+                    ui,
+                    text(locales, language, Label::Retries),
+                    label_width,
+                    stacked,
+                );
                 ui.add_sized(
                     [input_width, ui.spacing().interact_size.y],
                     egui::DragValue::new(&mut settings.max_retries).range(0..=MAX_RETRIES),
@@ -361,7 +366,12 @@ fn show_preferences(
             .num_columns(2)
             .spacing([12.0, 8.0])
             .show(ui, |ui| {
-                settings_label(ui, text(locales, language, Label::Language), label_width, stacked);
+                settings_label(
+                    ui,
+                    text(locales, language, Label::Language),
+                    label_width,
+                    stacked,
+                );
                 egui::ComboBox::from_id_salt("ui_language")
                     .width(input_width)
                     .selected_text(match settings.language {
@@ -401,7 +411,12 @@ fn show_preferences(
                     });
                 ui.end_row();
 
-                settings_label(ui, text(locales, language, Label::ZoomFactor), label_width, stacked);
+                settings_label(
+                    ui,
+                    text(locales, language, Label::ZoomFactor),
+                    label_width,
+                    stacked,
+                );
                 egui::ComboBox::from_id_salt("zoom_factor")
                     .width(input_width)
                     .selected_text(format!("{}%", settings.zoom_percent))

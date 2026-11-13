@@ -4,11 +4,7 @@ use eframe::egui::{
 use r_video_fetcher::{
     app::VideoFetcherApp,
     dialogs::settings::SettingsDialog,
-    models::{
-        locales::LocaleStrings,
-        storage::write_json,
-        structs::Settings,
-    },
+    models::{locales::LocaleStrings, storage::write_json, structs::Settings},
 };
 use std::{
     env, fs,
@@ -137,16 +133,24 @@ fn app_applies_saved_zoom_and_persists_keyboard_zoom() {
             screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(1024.0, 900.0))),
             ..Default::default()
         };
-        let _ = context.run(input(), |context| eframe::App::update(&mut app, context, &mut frame));
-        let _ = context.run(input(), |context| eframe::App::update(&mut app, context, &mut frame));
+        let _ = context.run(input(), |context| {
+            eframe::App::update(&mut app, context, &mut frame)
+        });
+        let _ = context.run(input(), |context| {
+            eframe::App::update(&mut app, context, &mut frame)
+        });
         assert!((context.zoom_factor() - 1.5).abs() < 0.001);
 
         let _ = context.run(input(), |context| {
             eframe::App::update(&mut app, context, &mut frame);
             context.set_zoom_factor(1.62);
         });
-        let _ = context.run(input(), |context| eframe::App::update(&mut app, context, &mut frame));
-        let _ = context.run(input(), |context| eframe::App::update(&mut app, context, &mut frame));
+        let _ = context.run(input(), |context| {
+            eframe::App::update(&mut app, context, &mut frame)
+        });
+        let _ = context.run(input(), |context| {
+            eframe::App::update(&mut app, context, &mut frame)
+        });
         let path = env::var_os("APPDATA")
             .map(std::path::PathBuf::from)
             .unwrap()
@@ -224,12 +228,10 @@ fn restoring_defaults_requires_confirmation() {
     let position = text_position(&shapes, "Restore defaults");
     click(&context, &mut dialog, &mut settings, &locales, position);
     let shapes = frame(&context, &mut dialog, &mut settings, &locales, vec![]);
-    let rect = egui::containers::AreaState::load(
-        &context,
-        egui::Id::new("restore_defaults_confirmation"),
-    )
-    .unwrap()
-    .rect();
+    let rect =
+        egui::containers::AreaState::load(&context, egui::Id::new("restore_defaults_confirmation"))
+            .unwrap()
+            .rect();
     let position = shapes
         .iter()
         .rev()
@@ -307,4 +309,3 @@ fn settings_dialog_opens_centered_and_remains_movable() {
     frame(&context, &mut dialog, &mut settings, &locales, vec![]);
     assert!((area().center() - egui::pos2(512.0, 450.0)).length() <= 1.5);
 }
-
