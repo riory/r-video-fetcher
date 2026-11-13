@@ -1,0 +1,59 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Check version matches tag
+        shell: pwsh
+        run: |
+          $cargoVersion = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"').Matches.Groups[1].Value
+          if ($env:GITHUB_REF_NAME -ne "v$cargoVersion") {
+            throw "Release tag $env:GITHUB_REF_NAME does not match Cargo.toml version $cargoVersion."
+          }
+          "APP_VERSION=$cargoVersion" >> $env:GITHUB_ENV
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Build
+        run: cargo build --release --locked --target x86_64-pc-windows-msvc
+
+      - name: Install Inno Setup
+        run: choco install innosetup --yes --no-progress
+
+      - name: Create installer
+        shell: pwsh
+        run: |
+          $compiler = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $compiler)) {
+            throw "Inno Setup compiler not found at $compiler."
+          }
+          & $compiler "/DAppVersion=$env:APP_VERSION" "packaging\r-video-fetcher.iss"
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          gh release create $env:GITHUB_REF_NAME `
+            "dist\r-video-fetcher-setup-$env:APP_VERSION.exe" `
+            --repo $env:GITHUB_REPOSITORY `
+            --generate-notes

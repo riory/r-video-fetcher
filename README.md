@@ -23,6 +23,14 @@ The app reports a clear error if either executable is missing. The **Settings �
 cargo run
 ```
 
+## Release and Winget
+
+Releases are built for Windows x64 by GitHub Actions. The release workflow runs the tests, builds the application, packages it with Inno Setup, and attaches the installer to a GitHub Release.
+
+To publish a release, make sure the version in `Cargo.toml` is the intended release version, then push a matching version tag (for example, `v0.1.0`). The workflow rejects tags that do not match the Cargo package version.
+
+After the GitHub Release is available, submit its installer URL to the [Windows Package Manager Community Repository](https://github.com/microsoft/winget-pkgs) using Microsoft's [WinGet manifest guide](https://learn.microsoft.com/en-us/windows/package-manager/package/manifest). The proposed package ID is `Riory.RVideoFetcher`; confirm it is available before submitting. WinGet users will also need `yt-dlp` and `ffmpeg`; the app's Init tab lists the commands to install them.
+
 ### VS Code
 
 Install the recommended Rust Analyzer and LLDB-DAP extensions. To run the app without a debugger, use **Terminal → Run Task → Run r-video-fetcher**; this runs `cargo run` and does not require LLDB-DAP. **F5** (or **Ctrl+F5**) uses the LLDB-DAP launch configuration and requires `lldb-dap.exe` at the configured path.
