@@ -7,3 +7,4 @@ pub mod model;
 pub mod models;
 pub mod storage;
 pub mod themes;
+mod tool_command;

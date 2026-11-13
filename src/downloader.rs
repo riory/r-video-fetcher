@@ -1,7 +1,7 @@
 use crate::{
     model::{FileType, Settings},
     models::project::{DownloadLogEntry, MediaType, Project},
-    storage,
+    storage, tool_command,
 };
 use anyhow::{Context, Result, anyhow, bail};
 use fs2::available_space;
@@ -95,7 +95,7 @@ pub fn inspect_batch_with_progress(
     check_tool("ffmpeg", &["-version"])?;
 
     report_progress(InspectionProgress::FetchingMetadata);
-    let mut command = Command::new("yt-dlp");
+    let mut command = tool_command::yt_dlp(&std::env::temp_dir());
     command
         .args([
             "--no-warnings",
@@ -226,7 +226,7 @@ fn spawn_size_estimate<'scope>(
 }
 
 fn estimate_item_size_from_url(url: &str) -> Result<Option<u64>> {
-    let mut command = Command::new("yt-dlp");
+    let mut command = tool_command::yt_dlp(&std::env::temp_dir());
     command
         .args([
             "--no-warnings",
@@ -645,8 +645,15 @@ fn download_item(
             output_directory.display()
         )
     })?;
-    let output_template = output_directory.join("%(title)s [%(id)s].%(ext)s");
-    let mut child = Command::new("yt-dlp")
+    let temp_directory = if output_directory.is_absolute() {
+        output_directory.clone()
+    } else {
+        std::env::current_dir()
+            .context("Could not determine current folder.")?
+            .join(&output_directory)
+    };
+    let output_template = temp_directory.join("%(title)s [%(id)s].%(ext)s");
+    let mut child = tool_command::yt_dlp(&temp_directory)
         .args([
             "--no-warnings",
             "--no-call-home",
@@ -816,7 +823,7 @@ pub fn find_downloaded_file(
 }
 
 fn verify_file(path: &Path) -> Result<()> {
-    let output = Command::new("ffmpeg")
+    let output = tool_command::media_tool("ffmpeg")
         .args(["-v", "error", "-xerror", "-i"])
         .arg(path)
         .args(["-f", "null", "-"])
@@ -833,7 +840,7 @@ fn verify_file(path: &Path) -> Result<()> {
 }
 
 fn check_tool(program: &str, arguments: &[&str]) -> Result<()> {
-    let output = Command::new(program)
+    let output = tool_command::media_tool(program)
         .args(arguments)
         .output()
         .with_context(|| format!("{program} was not found. Install it and add it to PATH."))?;

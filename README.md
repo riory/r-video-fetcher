@@ -47,6 +47,8 @@ Enter an HTTP(S) video or playlist URL, review the size and free-space estimate,
 
 Video resolution, audio sample rate, and audio channels are always visible in the workspace and start with the saved preferences. Changing a selection updates the current project and immediately saves it when the project already has a `.dwnl` file; unsaved projects retain the selections until saved. Batch selections do not change global preferences. The global **File type** preference defaults to the source format or can recode downloads to MP4. These preferences are applied through yt-dlp; if the requested source formats are unavailable, yt-dlp may fall back to another available format.
 
+Inspection uses the system temporary directory for yt-dlp's temporary files; downloads use their output folder. The installed app does not open console windows for yt-dlp or ffmpeg.
+
 ## Settings and history
 
 - Settings: `%APPDATA%\r-video-fetcher\settings.json`
